@@ -4,6 +4,7 @@ import std;
 import garchive;
 import gsunicode;
 import gsbzip2;
+import zstd;
 
 let MAX_FILES: i64 = 65535;
 let MAX_HEADER: i64 = 8388608;
@@ -15,7 +16,7 @@ struct Entry {
 }
 // flags: bit 0 directory, bit 1 defined mtime, bit 2 defined content CRC.
 // packed/offset describe archive bytes after read; size is always original.
-// method: 0 Copy, 1 BZip2. Writer input offsets address contents, not archive.
+// method: 0 Copy, 1 BZip2, 2 ZSTD (7-Zip-zstd ID 04 F7 11 01). Writer input offsets address contents, not archive.
 struct Cursor { pos: i64, error: i64 }
 
 fn path(e: Entry, names: const u8[:]) -> const u8[:] {
@@ -160,19 +161,36 @@ fn write_with_level(entries: const Entry[:], names: const u8[:], contents: const
         if e.size == 0 { continue; }
         let input = contents[(e.offset as i64)..(e.offset + e.size) as i64];
         let mark = out.len;
-        if level > 0 && e.size >= 64 { if !gsbzip2::append_stream(input, out, level) { return 1; } }
-        let packed = out.len - mark;
-        // Trial encoding uses the final output buffer; rollback reuses its pages.
-        // Include the two extra coder-ID bytes in the break-even decision.
-        if packed > 0 && packed + 2 < input.len {
-            packed_sizes.push(packed as u64); methods.push(1);
-        } else { out.resize(mark); out.append(input); packed_sizes.push(e.size); methods.push(0); }
+        var bz_out: u8[>..] = [];
+        var zs_out: u8[>..] = [];
+        var method: u8 = 0;
+        // Trial encodings are written after mark and rolled back; the smallest one that beats
+        // Copy wins. Each method's coder-ID bytes count in the break-even test.
+        if level > 0 && e.size >= 64 {
+            if !gsbzip2::append_stream(input, out, level) { return 1; }
+            let bz: i64 = out.len as i64 - mark as i64;
+            if bz > 0 && bz + 2 < input.len as i64 { bz_out.append(out[mark..out.len]); method = 1; }
+            out.resize(mark);
+            if !zstd::compress(input, out) { return 1; }
+            let zs: i64 = out.len as i64 - mark as i64;
+            let beats_bzip2 = method == 0 || zs < bz;
+            if zs > 0 && zs + 7 < input.len as i64 && beats_bzip2 { zs_out.append(out[mark..out.len]); method = 2; }
+            out.resize(mark);
+        }
+        if method == 0 { out.append(input); packed_sizes.push(e.size); }
+        else if method == 1 { out.append(bz_out[0..bz_out.len]); packed_sizes.push(bz_out.len as u64); }
+        else { out.append(zs_out[0..zs_out.len]); packed_sizes.push(zs_out.len as u64); }
+        methods.push(method);
     }
     if streams > 0 {
         header.append([4, 6]); put_number(header, 0); put_number(header, streams as u64); header.push(9);
         for n in packed_sizes { put_number(header, n); }
         header.append([0, 7, 11]); put_number(header, streams as u64); header.push(0);
-        for method in methods { header.append(if method == 0 { "\x01\x01\0" } else { "\x01\x03\x04\x02\x02" }); }
+        for method in methods {
+            if method == 0 { header.append("\x01\x01\0"); }
+            else if method == 1 { header.append("\x01\x03\x04\x02\x02"); }
+            else { header.append("\x01\x24\x04\xf7\x11\x01\x01\0"); }
+        }
         header.push(12);
         for e in entries { if e.size > 0 { put_number(header, e.size); } }
         header.append([10, 1]);
@@ -233,6 +251,7 @@ fn unpack(data: const u8[:], e: Entry, out: u8[>..]&) -> bool {
     let bytes = data[(e.offset as i64)..(e.offset + e.packed) as i64];
     if e.method == 0 { if e.packed != e.size { return false; } out.append(bytes); }
     else if e.method == 1 { if !gsbzip2::decompress(bytes, out, e.size as i64) { return false; } }
+    else if e.method == 2 { if !zstd::decompress(bytes, out) { return false; } }
     else { return false; }
     return out.len as u64 == e.size && (e.flags & 4) != 0 && garchive::crc32(out) == e.crc;
 }
@@ -293,6 +312,13 @@ fn read(data: const u8[:], entries: Entry[>..]&, names: u8[>..]&) -> i64 {
             let descriptor = byte(header, c);
             if descriptor == 1 && byte(header, c) == 0 { methods.push(0); }
             else if descriptor == 3 && byte(header, c) == 4 && byte(header, c) == 2 && byte(header, c) == 2 { methods.push(1); }
+            else if descriptor == 0x24 && byte(header, c) == 4 && byte(header, c) == 0xF7 && byte(header, c) == 0x11 && byte(header, c) == 1 {
+                // ZSTD 04 F7 11 01 (7-Zip-zstd). Its properties are one flags byte; 3 and 5 bytes are accepted too.
+                let props = number(header, c);
+                if props != 1 && props != 3 && props != 5 { return 2; }
+                for k in props as i64 { let skip = byte(header, c); }
+                methods.push(2);
+            }
             else { return if c.error != 0 { c.error } else { 2 }; }
         }
         expect(header, c, 12);

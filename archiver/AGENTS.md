@@ -2,7 +2,7 @@
 
 ## Purpose
 
-- Standalone archiver subtree: GARC0001, standard modern BZip2 and real 7z Copy/BZip2.
+- Standalone archiver subtree: GARC0001, standard modern BZip2 and real 7z Copy/BZip2/ZSTD (7-Zip-zstd ID).
 - Build/test commands in README and BZIP2.md run from the lz78-goose repository root;
   all imports and independent test samples must stay local to this subtree.
 
@@ -11,6 +11,7 @@
 - `garchive.goose`: versioned block container, CRC32 and public compress/decompress API.
 - `gsmtf.goose`, `gshuffman.goose`: reversible transforms and bounded entropy coding.
 - `gsbzip2.goose`: standard modern BZip2 streams, cyclic BWT and bounded decoder.
+- `zstd.goose`: RFC 8878 zstd decoder (all block types, Huffman and FSE tables, repeat offsets, checksum) and encoder (single-segment frames, raw literals, predefined FSE tables, greedy matches).
 - `bzip2_cli.goose`, `bzip2_test.goose`, `verify_bzip2.py`: standalone gbzip2 and independent interoperability/refusal checks.
 - `BZIP2.md`, `bench_bzip2_memory.py`, `bench_sevenz_memory.py`: buffer types/lifetimes, block policy and Windows whole-process peak measurements.
 - `bwt.goose`, `sais.goose`: existing BWT/SA-IS implementation; preserve licenses/NOTICE.
@@ -33,15 +34,17 @@
 ## Local Contracts
 
 - Format `GARC0001`, independent blocks of 64 KiB to 4 MiB; default 1 MiB.
-- Multi-file archives use real 7z 0.4, plain headers and non-solid Copy/BZip2 streams,
+- Multi-file archives use real 7z 0.4, plain headers and non-solid Copy/BZip2/ZSTD streams,
   readable by ordinary 7-Zip without plugins. CLI defaults to BZip2 level 3 (300000
   RLE1 bytes per block); optional 0 selects Copy, 1..9 selects block size.
-  Preserve Copy-only `write`; `write_with_level` chooses BZip2 only if packed+2 < original.
+  Preserve Copy-only `write`; `write_with_level` keeps the smaller of BZip2 and ZSTD only if it beats
+  Copy with its coder-ID bytes counted (BZip2 +2, ZSTD +7). Ordinary 7-Zip 23.01 lists ZSTD as
+  `04F71101` and refuses it as unsupported; 7-Zip-zstd is required to extract those streams.
   Never label GARC0001 as BZip2 or describe Copy as compression.
 - BZip2 reader accepts one exact modern stream, multiple blocks and levels 1..9;
   randomized blocks, concatenated streams, trailing bytes/nonzero padding are refused.
   Validate block/combined CRC, caller output limit and exact 7z original size/CRC.
-  `Entry.size` is original length, `packed` is archive length, `method` is 0 Copy/1 BZip2.
+  `Entry.size` is original length, `packed` is archive length, `method` is 0 Copy/1 BZip2/2 ZSTD.
   PackInfo CRC covers packed bytes; file CRC covers original bytes.
 - The initial g7z filesystem CLI is Windows x64/local-drive only. Library read/write
   status is 0 success, 1 invalid input/archive, 2 unsupported feature, 3 resource limit;

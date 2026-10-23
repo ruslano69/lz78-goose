@@ -42,7 +42,7 @@ fn main() {
         let status = sevenzip::write_with_level(entries, names, contents, archive, level);
         if status != 0 { fail(status); }
         if !gswinfiles::safe(source) || !write_file_atomic(source, archive) { fail(1); }
-        print("OK: ", entries.len, " entries, ", archive.len, " bytes, BZip2/Copy"); return;
+        print("OK: ", entries.len, " entries, ", archive.len, " bytes, Copy/BZip2/ZSTD"); return;
     }
     var archive: u8[>..] = [];
     if !read_file(source, archive) { fail(1); }
@@ -50,8 +50,8 @@ fn main() {
     let status = sevenzip::read(archive, entries, names);
     if status != 0 { fail(status); }
     if mode == "l" {
-        for e in entries { print(if (e.flags & 1) != 0 { "D " } else { "F " }, e.size, " ", if e.method == 1 { "BZip2 " } else { "Copy " }, sevenzip::path(e, names)); }
-        print("OK: ", entries.len, " entries, Copy/BZip2"); return;
+        for e in entries { print(if (e.flags & 1) != 0 { "D " } else { "F " }, e.size, " ", if e.method == 1 { "BZip2 " } else if e.method == 2 { "ZSTD " } else { "Copy " }, sevenzip::path(e, names)); }
+        print("OK: ", entries.len, " entries, Copy/BZip2/ZSTD"); return;
     }
     if mode == "t" {
         if !sevenzip::test(archive, entries) { write_stderr("crc_or_codec_error\n"); fail(1); }
