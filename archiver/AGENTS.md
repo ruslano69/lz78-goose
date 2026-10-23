@@ -12,6 +12,7 @@
 - `gsmtf.goose`, `gshuffman.goose`: reversible transforms and bounded entropy coding.
 - `gsbzip2.goose`: standard modern BZip2 streams, cyclic BWT and bounded decoder.
 - `zstd.goose`: RFC 8878 zstd decoder (all block types, Huffman and FSE tables, repeat offsets, checksum) and encoder (single-segment frames; Huffman literals with direct or FSE-coded weights; per-block FSE sequence tables chosen against the predefined ones; repeat offsets; double-fast matches as in libzstd level 3 and klauspost's default: a long table (8-byte hash, 2^17 entries) and a short table (4-byte hash, 2^16), no chains, only the last two positions of each match are hashed, search step grows by one per 128 misses). Callers that compress many entries hold one `EncCtx` (`enc_new()`) and call `compress_with(ctx, data, out)`: tables are not cleared between calls, entries of earlier calls are below the current base and never match. `compress()` builds tables sized by the input length (a small input allocates only the entries it can use), so one call on a small input is cheap without a kept state. Interop rule: a compressed FSE table that lists a single symbol is never written (libzstd reads it, klauspost/compress refuses it); a one-symbol stream uses RLE mode, or the predefined table when there are two sequences or fewer. Decoding checks must include a second decoder besides the zstd CLI.
+- `zstd_cli.goose`, `verify_zstd.py`, `verify_zstd_go.py`: standalone gzstd, two-way check against the zstd command, and an optional two-way check against klauspost/compress (needs Go and the module; prints SKIPPED otherwise).
 - `bzip2_cli.goose`, `bzip2_test.goose`, `verify_bzip2.py`: standalone gbzip2 and independent interoperability/refusal checks.
 - `BZIP2.md`, `bench_bzip2_memory.py`, `bench_sevenz_memory.py`: buffer types/lifetimes, block policy and Windows whole-process peak measurements.
 - `bwt.goose`, `sais.goose`: existing BWT/SA-IS implementation; preserve licenses/NOTICE.
@@ -88,6 +89,11 @@
   Its junction fixture needs local junction-creation permission; remove only the junction itself.
 - `goose run bzip2_test.goose`; build bzip2_cli.goose optimized/debug and run
   `verify_bzip2.py --exe EXE --sevenzip FULL_7ZA --out REPO_BUILD_DIR` for both.
+- `python -B verify_zstd.py --goose GOOSE --zstd ZSTD --out REPO_BUILD_DIR` after any zstd change.
+  Also run `python -B verify_zstd_go.py --goose GOOSE --out REPO_BUILD_DIR [--require]`: the zstd command
+  accepts streams that other decoders refuse. Its multi-block word cases reproduce the single-symbol
+  FSE table defect; it needs network access for the module and may download a Go toolchain
+  (`--toolchain local` forbids that).
 - Run `verify_sevenz_bzip2.py --exe G7Z --sevenzip FULL_7ZA --out REPO_BUILD_DIR`
   for both builds. 7zr lacks BZip2; use a caller-supplied full official 7za.
 - Windows memory benchmarks retain exact inputs, source/executable hashes and OS counters
