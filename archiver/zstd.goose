@@ -78,15 +78,31 @@ fn bwd_init(src: const u8[:]) -> Bwd {
 
 // Reads k bits taken from just below r.pos; the value's first bit is its MSB. Bits below
 // the start of the stream read as 0, and r.pos < 0 afterwards means the stream ran out.
+// The bits are gathered from whole bytes, not one at a time.
 fn bwd_read(src: const u8[:], r: Bwd&, k: i64) -> i64 {
+    if k == 0 { return 0; }
+    let lo = r.pos - k;
     var v: i64 = 0;
-    for i in k {
-        let idx = r.pos - k + i;
-        if idx >= 0 {
-            v = v | ((((src[idx >> 3] as i64) >> (idx & 7)) & 1) << i);
+    if lo >= 0 {
+        let shift = lo & 7;
+        var acc: i64 = 0;
+        var j = lo >> 3;
+        var got: i64 = 0;
+        while got < shift + k {
+            acc = acc | ((src[j] as i64) << got);
+            j += 1;
+            got += 8;
+        }
+        v = (acc >> shift) & ((1 << k) - 1);
+    } else {
+        for i in k {
+            let idx = lo + i;
+            if idx >= 0 {
+                v = v | ((((src[idx >> 3] as i64) >> (idx & 7)) & 1) << i);
+            }
         }
     }
-    r.pos -= k;
+    r.pos = lo;
     return v;
 }
 
@@ -694,10 +710,11 @@ let BLOCK_MAX: i64 = 131072;
 let MIN_MATCH_ZSTD: i64 = 3;
 let HASH_BITS_ZSTD: i64 = 16;
 let CHAIN_DEPTH: i64 = 16;
+let NICE_LEN_ZSTD: i64 = 128;
 
 struct FseCt { tl: i64, tbl: u16[512], dnb: i64[64], dfind: i64[64] }
 struct BitW { acc: u64, count: i64 }
-struct Seq { ll: i64, ml: i64, off: i64 }
+struct Seq { ll: i64, ml: i64, ov: i64 }
 
 fn fse_ct_new() -> FseCt {
     return FseCt { 0, [0; 512], [0; 64], [0; 64] };
@@ -813,7 +830,7 @@ fn encode_sequences(seqs: Seq[:], ll_ct: FseCt, of_ct: FseCt, ml_ct: FseCt, out:
     let last = seqs[n - 1];
     let llc = ll_code(last.ll);
     let mlc = ml_code(last.ml);
-    let ofv = last.off + 3;
+    let ofv = last.ov;
     let ofc = highbit(ofv);
     var st_ll = fse_init(ll_ct, llc);
     var st_of = fse_init(of_ct, ofc);
@@ -826,7 +843,7 @@ fn encode_sequences(seqs: Seq[:], ll_ct: FseCt, of_ct: FseCt, ml_ct: FseCt, out:
         let s = seqs[i];
         let llc2 = ll_code(s.ll);
         let mlc2 = ml_code(s.ml);
-        let ofv2 = s.off + 3;
+        let ofv2 = s.ov;
         let ofc2 = highbit(ofv2);
         st_of = fse_put(out, bw, of_ct, st_of, ofc2);
         st_ml = fse_put(out, bw, ml_ct, st_ml, mlc2);
@@ -869,27 +886,499 @@ fn put_literals(out: u8[>..]&, lits: u8[>..]) {
     out.append(lits[0..lits.len]);
 }
 
-// Encodes one block of data[start..end). Returns false if it cannot be made smaller.
-fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], prev: i32[:], out: u8[>..]&) {
+fn hash4_zstd(data: const u8[:], p: i64) -> i64 {
+    let v: u32 = (data[p] as u32) | ((data[p + 1] as u32) << 8) | ((data[p + 2] as u32) << 16) | ((data[p + 3] as u32) << 24);
+    return ((v * 2654435761) >> (32 - HASH_BITS_ZSTD)) as i64;
+}
+// Length-limited Huffman code lengths (Kraft-exact repair, as zlib-style builders).
+fn huf_lengths(freq: i64[:], maxbits: i64, lengths: i64[:]) -> bool {
+    var order: i64[288] = [0; 288];
+    var weight: u64[576] = [0; 576];
+    var parent: i64[576] = [0; 576];
+    var depth: i64[576] = [0; 576];
+    var count: i64[320] = [0; 320];
+    var m: i64 = 0;
+    for s in freq.len {
+        lengths[s] = 0;
+        if freq[s] > 0 {
+            order[m] = s;
+            m += 1;
+        }
+    }
+    // A code needs at least two symbols to be complete; add unused ones with weight 1.
+    if m == 0 {
+        order[0] = 0;
+        order[1] = 1;
+        m = 2;
+    } else if m == 1 {
+        order[1] = if order[0] == 0 { 1 } else { 0 };
+        m = 2;
+    }
+    for i in m {
+        let f = freq[order[i]] as u64;
+        weight[i] = if f > 0 { f } else { 1 };
+    }
+    // Insertion sort by weight: m is at most 288, so this is cheap next to the symbol loop.
+    var i: i64 = 1;
+    while i < m {
+        var j = i;
+        while j > 0 && weight[j - 1] > weight[j] {
+            let tw = weight[j];
+            weight[j] = weight[j - 1];
+            weight[j - 1] = tw;
+            let to = order[j];
+            order[j] = order[j - 1];
+            order[j - 1] = to;
+            j -= 1;
+        }
+        i += 1;
+    }
+    // Two-queue Huffman: leaves 0..m-1, internal nodes m..2m-2.
+    var li: i64 = 0;
+    var ii: i64 = m;
+    var next: i64 = m;
+    var step: i64 = 0;
+    while step < m - 1 {
+        var a: i64 = 0;
+        var b: i64 = 0;
+        var k: i64 = 0;
+        while k < 2 {
+            var pick: i64 = 0;
+            if li < m && (ii >= next || weight[li] <= weight[ii]) {
+                pick = li;
+                li += 1;
+            } else {
+                pick = ii;
+                ii += 1;
+            }
+            if k == 0 { a = pick; } else { b = pick; }
+            k += 1;
+        }
+        weight[next] = weight[a] + weight[b];
+        parent[a] = next;
+        parent[b] = next;
+        next += 1;
+        step += 1;
+    }
+    let root = next - 1;
+    depth[root] = 0;
+    var node = root - 1;
+    while node >= 0 {
+        depth[node] = depth[parent[node]] + 1;
+        node -= 1;
+    }
+    for leaf in m {
+        count[depth[leaf]] += 1;
+    }
+    var d = maxbits + 1;
+    while d < 320 {
+        count[maxbits] += count[d];
+        count[d] = 0;
+        d += 1;
+    }
+    let full: i64 = 1 << maxbits;
+    var total: i64 = 0;
+    var len: i64 = 1;
+    while len <= maxbits {
+        total += count[len] << (maxbits - len);
+        len += 1;
+    }
+    while total > full {
+        if count[maxbits] == 0 { return false; }
+        count[maxbits] -= 1;
+        var up = maxbits - 1;
+        while up > 0 && count[up] == 0 { up -= 1; }
+        if up == 0 { return false; }
+        count[up] -= 1;
+        count[up + 1] += 2;
+        total -= 1;
+    }
+    if total != full { return false; }
+    // Most frequent symbols (end of `order`) take the shortest lengths.
+    var idx: i64 = m - 1;
+    var l: i64 = 1;
+    while l <= maxbits {
+        var c = count[l];
+        while c > 0 {
+            lengths[order[idx]] = l;
+            idx -= 1;
+            c -= 1;
+        }
+        l += 1;
+    }
+    return true;
+}
+
+// Huffman literal coding. Codes follow huf_from_lengths: the longest codes take the lowest
+// table indices, so a symbol's code is its index shifted down by (tl - length). The tree is
+// described with direct weights (one 4-bit weight per symbol below the largest used one; the
+// largest is implicit), which covers literal alphabets up to 128 symbols.
+fn huf_codes(lens: i64[:], nsym: i64, tl: i64, codes: i64[:]) {
+    var idx: i64 = 0;
+    for w in tl {
+        let len = tl - w;
+        for s in nsym {
+            if lens[s] == len {
+                codes[s] = idx >> w;
+                idx += 1 << w;
+            }
+        }
+    }
+}
+
+// Writes the literal bytes as a backward Huffman stream (the decoder reads it from the end).
+fn huf_put_stream(lits: const u8[:], lens: i64[:], codes: i64[:], out: u8[>..]&) {
+    var bw = BitW { 0, 0 };
+    var i = lits.len - 1;
+    while i >= 0 {
+        let s = lits[i] as i64;
+        bitw_add(out, bw, codes[s], lens[s]);
+        i -= 1;
+    }
+    bitw_close(out, bw);
+}
+
+// Appends a compressed literals section to out and returns true; false if the literals are
+// not suitable (fewer than two distinct bytes, or a largest byte above 128).
+fn put_compressed_literals(lits: const u8[:], out: u8[>..]&) -> bool {
+    let n = lits.len as i64;
+    var freq: i64[256] = [0; 256];
+    for i in n { freq[lits[i] as i64] += 1; }
+    var maxsym: i64 = 0;
+    var distinct: i64 = 0;
+    for s in 256 {
+        if freq[s] > 0 {
+            distinct += 1;
+            maxsym = s;
+        }
+    }
+    if distinct < 2 || maxsym == 0 { return false; }
+    var lens: i64[256] = [0; 256];
+    if !huf_lengths(freq, 11, lens) { return false; }
+    var tl: i64 = 0;
+    for s in maxsym + 1 {
+        if lens[s] > tl { tl = lens[s]; }
+    }
+    var codes: i64[256] = [0; 256];
+    huf_codes(lens, maxsym + 1, tl, codes);
+    // Tree description: FSE-coded weights when the alphabet is large, else direct 4-bit weights.
+    var tree: u8[>..] = [];
+    var weights: i64[256] = [0; 256];
+    for i in maxsym { weights[i] = if lens[i] > 0 { tl + 1 - lens[i] } else { 0 }; }
+    if maxsym >= 4 && put_fse_weights(weights, maxsym, tree) >= 0 {
+        // weights already written into tree
+    } else if maxsym <= 128 {
+        tree.push((127 + maxsym) as u8);
+        var i: i64 = 0;
+        while i < maxsym {
+            let hi = weights[i];
+            let lo = if i + 1 < maxsym { weights[i + 1] } else { 0 };
+            tree.push(((hi << 4) | lo) as u8);
+            i += 2;
+        }
+    } else {
+        return false;
+    }
+    var stream_bytes: u8[>..] = [];
+    var sizes: i64[4] = [0; 4];
+    var four = n >= 256;
+    if !four {
+        huf_put_stream(lits, lens, codes, stream_bytes);
+        sizes[0] = stream_bytes.len as i64;
+    } else {
+        let seg = (n + 3) / 4;
+        var starts: i64[5] = [0, seg, 2 * seg, 3 * seg, n];
+        for k in 4 {
+            var part: u8[>..] = [];
+            huf_put_stream(lits[starts[k]..starts[k + 1]], lens, codes, part);
+            sizes[k] = part.len as i64;
+            stream_bytes.append(part[0..part.len]);
+        }
+    }
+    let jump = if four { 6 } else { 0 };
+    let csize = tree.len as i64 + jump + stream_bytes.len as i64;
+    var fmt: i64 = 0;
+    if !four {
+        fmt = 0;
+    } else if n < 1024 && csize < 1024 {
+        fmt = 1;
+    } else if n < 16384 && csize < 16384 {
+        fmt = 2;
+    } else {
+        fmt = 3;
+    }
+    if fmt == 2 {
+        put_le(out, 2 | (2 << 2) | (n << 4) | (csize << 18), 4);
+    } else if fmt == 3 {
+        put_le(out, 2 | (3 << 2) | (n << 4) | (csize << 22), 5);
+    } else {
+        put_le(out, 2 | (fmt << 2) | (n << 4) | (csize << 14), 3);
+    }
+    out.append(tree[0..tree.len]);
+    if four {
+        put_le(out, sizes[0], 2);
+        put_le(out, sizes[1], 2);
+        put_le(out, sizes[2], 2);
+    }
+    out.append(stream_bytes[0..stream_bytes.len]);
+    return true;
+}
+
+// Forward bitstream padding (no sentinel): pending bits go out in whole bytes.
+fn bitw_pad(out: u8[>..]&, bw: BitW&) {
+    if bw.count > 0 {
+        out.push((bw.acc & 255) as u8);
+    }
+    bw.acc = 0;
+    bw.count = 0;
+}
+
+// Normalizes counts to sum 2^acc; every present symbol keeps at least one slot.
+fn fse_normalize(counts: i64[:], nsym: i64, acc: i64, norm: i64[:]) -> bool {
+    let size: i64 = 1 << acc;
+    var total: i64 = 0;
+    var present: i64 = 0;
+    for s in nsym {
+        total += counts[s];
+        if counts[s] > 0 { present += 1; }
+    }
+    if present < 2 || present > size { return false; }
+    var sum: i64 = 0;
+    for s in nsym {
+        if counts[s] > 0 {
+            var v = counts[s] * size / total;
+            if v < 1 { v = 1; }
+            norm[s] = v;
+        } else {
+            norm[s] = 0;
+        }
+        sum += norm[s];
+    }
+    while sum > size {
+        var best: i64 = -1;
+        for s in nsym {
+            if norm[s] > 1 && (best < 0 || counts[s] > counts[best]) { best = s; }
+        }
+        if best < 0 { return false; }
+        norm[best] -= 1;
+        sum -= 1;
+    }
+    while sum < size {
+        var best: i64 = -1;
+        for s in nsym {
+            if counts[s] > 0 && (best < 0 || counts[s] > counts[best]) { best = s; }
+        }
+        norm[best] += 1;
+        sum += 1;
+    }
+    return true;
+}
+
+// Writes an FSE normalized-count header (RFC 8878 4.1.1), the inverse of fse_read_header.
+fn fse_put_header(norm: i64[:], nsym: i64, acc: i64, out: u8[>..]&) {
+    var bw = BitW { 0, 0 };
+    bitw_add(out, bw, acc - 5, 4);
+    var remaining: i64 = (1 << acc) + 1;
+    var threshold: i64 = 1 << acc;
+    var nb: i64 = acc + 1;
+    var s: i64 = 0;
+    var prev0 = false;
+    while remaining > 1 && s < nsym {
+        if prev0 {
+            // Zero-count symbols that follow: 2-bit codes, three per code 3, then the rest.
+            var r: i64 = 0;
+            while s + r < nsym && norm[s + r] == 0 { r += 1; }
+            var k = r;
+            while k >= 3 {
+                bitw_add(out, bw, 3, 2);
+                k -= 3;
+            }
+            bitw_add(out, bw, k, 2);
+            s += r;
+            prev0 = false;
+            if s >= nsym { break; }
+        }
+        let c = norm[s];
+        let max = (2 * threshold - 1) - remaining;
+        var x = c + 1;
+        let fits_short = x < max;
+        if x >= threshold { x += max; }
+        if x < max {
+            bitw_add(out, bw, x, nb - 1);
+        } else {
+            bitw_add(out, bw, x, nb);
+        }
+        if c >= 0 { remaining -= c; } else { remaining += c; }
+        prev0 = c == 0;
+        s += 1;
+        if remaining < threshold {
+            if remaining <= 1 { break; }
+            nb = highbit(remaining) + 1;
+            threshold = 1 << (nb - 1);
+        }
+    }
+    bitw_pad(out, bw);
+}
+
+// Huffman weights (w[0..nw), implicit last symbol excluded) as an FSE stream with two states
+// (decoded by huf_header). Returns the bytes written, or -1 if the table cannot be built.
+fn put_fse_weights(w: i64[:], nw: i64, out: u8[>..]&) -> i64 {
+    var counts: i64[16] = [0; 16];
+    for i in nw { counts[w[i]] += 1; }
+    var maxw: i64 = 0;
+    for v in 12 {
+        if counts[v] > 0 { maxw = v; }
+    }
+    var norm: i64[16] = [0; 16];
+    let acc: i64 = 6;
+    if !fse_normalize(counts, maxw + 1, acc, norm) { return -1; }
+    var ct = fse_ct_new();
+    fse_ct_build(norm, maxw + 1, acc, ct);
+    var body: u8[>..] = [];
+    fse_put_header(norm, maxw + 1, acc, body);
+    var bw = BitW { 0, 0 };
+    var st_a = fse_init(ct, w[nw - 1]);
+    var st_b = fse_init(ct, w[nw - 2]);
+    var i = nw - 3;
+    while i >= 0 {
+        if ((i - (nw - 1)) & 1) == 0 {
+            st_a = fse_put(body, bw, ct, st_a, w[i]);
+        } else {
+            st_b = fse_put(body, bw, ct, st_b, w[i]);
+        }
+        i -= 1;
+    }
+    // The decoder reads state 1 (even positions) first, so it is flushed last.
+    let size: i64 = 1 << acc;
+    let odd_state = if ((nw - 1) & 1) == 1 { st_a } else { st_b };
+    let even_state = if ((nw - 1) & 1) == 1 { st_b } else { st_a };
+    bitw_add(body, bw, odd_state - size, acc);
+    bitw_add(body, bw, even_state - size, acc);
+    bitw_close(body, bw);
+    if body.len >= 128 { return -1; }
+    out.push(body.len as u8);
+    out.append(body[0..body.len]);
+    return body.len as i64 + 1;
+}
+
+// Chooses the FSE table for one sequence kind: the predefined table (mode 0) or a table built
+// from this block's code counts (mode 2, header written to hdr), whichever codes the codes in
+// fewer bits including the header. ct receives the table the encoder uses.
+fn choose_seq_table(codes: i64[:], n: i64, nsym: i64, dnorm: i64[:], dacc: i64, acc: i64, ct: FseCt&, hdr: u8[>..]&) -> i64 {
+    var counts: i64[64] = [0; 64];
+    for i in n { counts[codes[i]] += 1; }
+    var cost_pre: i64 = 0;
+    for s in nsym {
+        let m = if dnorm[s] < 0 { -dnorm[s] } else { dnorm[s] };
+        if counts[s] > 0 && m > 0 { cost_pre += counts[s] * (dacc - highbit(m)); }
+    }
+    var norm: i64[64] = [0; 64];
+    var present: i64 = 0;
+    var only: i64 = 0;
+    for s in nsym {
+        if counts[s] > 0 { present += 1; only = s; }
+    }
+    if present == 1 {
+        norm[only] = 1 << acc;
+    } else if !fse_normalize(counts, nsym, acc, norm) {
+        fse_ct_build(dnorm, nsym, dacc, ct);
+        return 0;
+    }
+    var header: u8[>..] = [];
+    fse_put_header(norm, nsym, acc, header);
+    var cost_new: i64 = 8 * header.len as i64;
+    for s in nsym {
+        if counts[s] > 0 { cost_new += counts[s] * (acc - highbit(norm[s])); }
+    }
+    if cost_new < cost_pre {
+        fse_ct_build(norm, nsym, acc, ct);
+        hdr.append(header[0..header.len]);
+        return 2;
+    }
+    fse_ct_build(dnorm, nsym, dacc, ct);
+    return 0;
+}
+
+// Repeat-offset state as the decoder keeps it (RFC 8878 3.1.2.5): applies the offset value
+// `ov` (1..3 for repeat codes, offset + 3 otherwise) with literal length `ll`, returns the
+// offset and updates r in place.
+fn rep_update(ov: i64, ll: i64, r: i64[:]) -> i64 {
+    let ll0: i64 = if ll == 0 { 1 } else { 0 };
+    if ov > 3 {
+        let off = ov - 3;
+        r[2] = r[1];
+        r[1] = r[0];
+        r[0] = off;
+        return off;
+    }
+    let rc = ov - 1 + ll0;
+    if rc == 0 { return r[0]; }
+    let cur = if rc == 3 { r[0] - 1 } else { r[rc] };
+    if rc >= 2 { r[2] = r[1]; }
+    r[1] = r[0];
+    r[0] = cur;
+    return cur;
+}
+
+// Length of the common prefix of data[a..] and data[p..], at most limit bytes.
+fn match_at(data: const u8[:], a: i64, p: i64, limit: i64) -> i64 {
+    var l: i64 = 0;
+    while l < limit && data[a + l] == data[p + l] { l += 1; }
+    return l;
+}
+
+// Encodes data[start..end) as one block. r holds the repeat offsets at the block start and
+// is updated only when the block is written compressed; a raw block leaves it unchanged.
+fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], prev: i32[:], r: i64[:], out: u8[>..]&) {
     var seqs: Seq[>..] = [];
     var lits: u8[>..] = [];
     var lit_start = start;
     var p = start;
+    var rr: i64[3] = [r[0], r[1], r[2]];
+    var misses: i64 = 0;
     while p < end {
         var best_len: i64 = 0;
         var best_pos: i64 = -1;
+        var best_ov: i64 = 0;
+        let ll = p - lit_start;
+        let limit = min(131072, end - p);
+        // Repeat-offset candidates that the coding can express at this literal length.
+        var roff: i64[3] = [rr[1], rr[2], rr[0] - 1];
+        if ll > 0 {
+            roff[0] = rr[0];
+            roff[1] = rr[1];
+            roff[2] = rr[2];
+        }
+        for k in 3 {
+            let o = roff[k];
+            if o <= 0 || p - o < 0 { continue; }
+            // A candidate can only win if it matches at best_len (for ties the repeat code wins).
+            if best_len > 0 && (best_len >= limit || data[p - o + best_len] != data[p + best_len]) { continue; }
+            let l = match_at(data, p - o, p, limit);
+            if l >= MIN_MATCH_ZSTD && l >= best_len {
+                best_len = l;
+                best_pos = p - o;
+                best_ov = k + 1;
+            }
+        }
         if p + 4 <= data.len {
             let h = hash4_zstd(data, p);
             var cand = head[h] as i64;
             var chain = CHAIN_DEPTH;
-            let limit = min(131072, end - p);
             while cand >= 0 && chain > 0 {
                 chain -= 1;
-                var l: i64 = 0;
-                while l < limit && data[cand + l] == data[p + l] { l += 1; }
+                // Only a candidate matching at best_len can be longer than the best so far.
+                if best_len > 0 && (best_len >= limit || data[cand + best_len] != data[p + best_len]) {
+                    cand = prev[cand] as i64;
+                    continue;
+                }
+                let l = match_at(data, cand, p, limit);
                 if l > best_len {
                     best_len = l;
                     best_pos = cand;
+                    best_ov = (p - cand) + 3;
+                    // A long enough match ends the search, as libzstd's target length does.
+                    if best_len >= NICE_LEN_ZSTD { break; }
                 }
                 cand = prev[cand] as i64;
             }
@@ -897,7 +1386,9 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], prev: i
             head[h] = p as i32;
         }
         if best_len >= MIN_MATCH_ZSTD {
-            seqs.push(Seq { p - lit_start, best_len, p - best_pos });
+            misses = 0;
+            seqs.push(Seq { ll, best_len, best_ov });
+            rep_update(best_ov, ll, rr);
             lits.append(data[lit_start..p]);
             var k = p + 1;
             while k < p + best_len && k + 4 <= data.len {
@@ -909,13 +1400,22 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], prev: i
             p += best_len;
             lit_start = p;
         } else {
-            p += 1;
+            // Search step grows with the miss run, as libzstd's fast strategy does.
+            misses += 1;
+            p += 1 + (misses >> 7);
         }
     }
     lits.append(data[lit_start..end]);
     // Block body: literals, sequence count, modes (all predefined), bitstream.
     var body: u8[>..] = [];
-    put_literals(body, lits[0..lits.len]);
+    var raw_lits: u8[>..] = [];
+    put_literals(raw_lits, lits[0..lits.len]);
+    var huf_lits: u8[>..] = [];
+    if put_compressed_literals(lits[0..lits.len], huf_lits) && huf_lits.len < raw_lits.len {
+        body.append(huf_lits[0..huf_lits.len]);
+    } else {
+        body.append(raw_lits[0..raw_lits.len]);
+    }
     let n = seqs.len;
     if n == 0 {
         body.push(0);
@@ -929,18 +1429,28 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], prev: i
         put_le(body, n - 0x7F00, 2);
     }
     if n > 0 {
-        body.push(0);
+        var llc: i64[>..] = [];
+        var mlc: i64[>..] = [];
+        var ofc: i64[>..] = [];
+        for i in n {
+            llc.push(ll_code(seqs[i].ll));
+            mlc.push(ml_code(seqs[i].ml));
+            ofc.push(highbit(seqs[i].ov));
+        }
         var ll_ct = fse_ct_new();
         var of_ct = fse_ct_new();
         var ml_ct = fse_ct_new();
-        fse_ct_build(LL_DEFAULT, 36, 6, ll_ct);
-        fse_ct_build(OF_DEFAULT, 29, 5, of_ct);
-        fse_ct_build(ML_DEFAULT, 53, 6, ml_ct);
+        var tables: u8[>..] = [];
+        let m_ll = choose_seq_table(llc[0..n], n, 36, LL_DEFAULT, 6, 6, ll_ct, tables);
+        let m_of = choose_seq_table(ofc[0..n], n, 29, OF_DEFAULT, 5, 5, of_ct, tables);
+        let m_ml = choose_seq_table(mlc[0..n], n, 53, ML_DEFAULT, 6, 6, ml_ct, tables);
+        body.push(((m_ll << 6) | (m_of << 4) | (m_ml << 2)) as u8);
+        body.append(tables[0..tables.len]);
         encode_sequences(seqs[0..n], ll_ct, of_ct, ml_ct, body);
     }
     let raw = end - start;
     if n == 0 || body.len >= raw {
-        // Raw block: the bytes themselves.
+        // Raw block: the bytes themselves; the repeat offsets stay as they were.
         let hdr = 0 | ((raw as i64) << 3);
         put_le(out, hdr, 3);
         out.append(data[start..end]);
@@ -948,12 +1458,10 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], prev: i
         let hdr = 0 | (2 << 1) | ((body.len as i64) << 3);
         put_le(out, hdr, 3);
         out.append(body[0..body.len]);
+        r[0] = rr[0];
+        r[1] = rr[1];
+        r[2] = rr[2];
     }
-}
-
-fn hash4_zstd(data: const u8[:], p: i64) -> i64 {
-    let v: u32 = (data[p] as u32) | ((data[p + 1] as u32) << 8) | ((data[p + 2] as u32) << 16) | ((data[p + 3] as u32) << 24);
-    return ((v * 2654435761) >> (32 - HASH_BITS_ZSTD)) as i64;
 }
 
 // Compresses data as one zstd frame.
@@ -966,6 +1474,7 @@ fn compress(data: const u8[:], out: u8[>..]&) -> bool {
     var head: i32[65536] = [-1; 65536];
     var prev: i32[>..] = [];
     for i in data.len { prev.push(-1); }
+    var reps: i64[3] = [1, 4, 8];
     var start: i64 = 0;
     if data.len == 0 {
         put_le(out, 1 | (0 << 1) | (0 << 3), 3);
@@ -974,7 +1483,7 @@ fn compress(data: const u8[:], out: u8[>..]&) -> bool {
         let end = min(data.len, start + BLOCK_MAX);
         let last = end == data.len;
         var blkbuf: u8[>..] = [];
-        compress_block(data, start, end, head[0..65536], prev[0..prev.len], blkbuf);
+        compress_block(data, start, end, head[0..65536], prev[0..prev.len], reps[0..3], blkbuf);
         // The first byte of the block header carries the last-block flag.
         if last {
             blkbuf[0] = blkbuf[0] | 1;
