@@ -563,9 +563,10 @@ fn rotl64(x: u64, r: i64) -> u64 {
 }
 
 fn read64(d: const u8[:], i: i64) -> u64 {
-    // Unrolled: a loop with a fixed trip count still costs one mispredict per call.
-    return (d[i] as u64) | ((d[i + 1] as u64) << 8) | ((d[i + 2] as u64) << 16) | ((d[i + 3] as u64) << 24) |
-        ((d[i + 4] as u64) << 32) | ((d[i + 5] as u64) << 40) | ((d[i + 6] as u64) << 48) | ((d[i + 7] as u64) << 56);
+    // One bounds check for the whole word, then constant indices into the slice.
+    let c = d[i..i + 8];
+    return (c[0] as u64) | ((c[1] as u64) << 8) | ((c[2] as u64) << 16) | ((c[3] as u64) << 24) |
+        ((c[4] as u64) << 32) | ((c[5] as u64) << 40) | ((c[6] as u64) << 48) | ((c[7] as u64) << 56);
 }
 
 fn xxh_round(acc: u64, input: u64) -> u64 {
@@ -1328,7 +1329,7 @@ fn match_at(data: const u8[:], a: i64, p: i64, limit: i64) -> i64 {
 
 // Encodes data[start..end) as one block. r holds the repeat offsets at the block start and
 // is updated only when the block is written compressed; a raw block leaves it unchanged.
-fn compress_block(data: const u8[:], start: i64, end: i64, ctx: EncCtx&, r: i64[:], out: u8[>..]&) {
+fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: i32[:], base: i64, hshift: i64, lshift: i64, r: i64[:], out: u8[>..]&) {
     var seqs: Seq[>..] = [];
     var lits: u8[>..] = [];
     var lit_start = start;
@@ -1363,12 +1364,12 @@ fn compress_block(data: const u8[:], start: i64, end: i64, ctx: EncCtx&, r: i64[
         }
         if p + 8 <= data.len {
             // Two tables, no chains: the long table hashes 8 bytes, the short one 4.
-            let hl = hash8_zstd(data, p);
-            let hs = hash4_zstd(data, p);
-            let cl = ctx.longt[hl] as i64 - ctx.base;
-            let cs = ctx.head[hs] as i64 - ctx.base;
-            ctx.longt[hl] = (p + ctx.base) as i32;
-            ctx.head[hs] = (p + ctx.base) as i32;
+            let hl = (hash8_zstd(data, p) >> lshift);
+            let hs = (hash4_zstd(data, p) >> hshift);
+            let cl = longt[hl] as i64 - base;
+            let cs = head[hs] as i64 - base;
+            longt[hl] = (p + base) as i32;
+            head[hs] = (p + base) as i32;
             if cl >= 0 && cl < p {
                 let l = match_at(data, cl, p, limit);
                 if l >= MIN_MATCH_ZSTD && l > best_len {
@@ -1396,12 +1397,12 @@ fn compress_block(data: const u8[:], start: i64, end: i64, ctx: EncCtx&, r: i64[
             // The last two positions of the match, each if its 8 bytes are in the block.
             let e1 = p + best_len - 2;
             if e1 + 8 <= data.len {
-                ctx.longt[hash8_zstd(data, e1)] = (e1 + ctx.base) as i32;
-                ctx.head[hash4_zstd(data, e1)] = (e1 + ctx.base) as i32;
+                longt[(hash8_zstd(data, e1) >> lshift)] = (e1 + base) as i32;
+                head[(hash4_zstd(data, e1) >> hshift)] = (e1 + base) as i32;
             }
             if e1 + 9 <= data.len {
-                ctx.longt[hash8_zstd(data, e1 + 1)] = (e1 + 1 + ctx.base) as i32;
-                ctx.head[hash4_zstd(data, e1 + 1)] = (e1 + 1 + ctx.base) as i32;
+                longt[(hash8_zstd(data, e1 + 1) >> lshift)] = (e1 + 1 + base) as i32;
+                head[(hash4_zstd(data, e1 + 1) >> hshift)] = (e1 + 1 + base) as i32;
             }
             p += best_len;
             lit_start = p;
@@ -1472,23 +1473,22 @@ fn compress_block(data: const u8[:], start: i64, end: i64, ctx: EncCtx&, r: i64[
 
 // Compresses data as one zstd frame.
 fn compress(data: const u8[:], out: u8[>..]&) -> bool {
-    // Built in place: returning the 768 KB state from a function would copy it.
-    var ctx = EncCtx { [0; 65536], [0; 131072], 1 };
-    return compress_with(ctx, data, out);
+    // Tables of the size the input needs: a small input does not pay for the full ones.
+    let hb = highbit(data.len as i64) + 1;
+    let hbits = min(16, max(10, hb));
+    let lbits = min(17, max(10, hb + 1));
+    var head: i32[>..] = [];
+    head.resize(1 << hbits, 0);
+    var longt: i32[>..] = [];
+    longt.resize(1 << lbits, 0);
+    return encode_frame(data, out, head[0..head.len], longt[0..longt.len], 1, 16 - hbits, 17 - lbits);
 }
-fn compress_with(ctx: EncCtx&, data: const u8[:], out: u8[>..]&) -> bool {
+fn encode_frame(data: const u8[:], out: u8[>..]&, head: i32[:], longt: i32[:], base: i64, hshift: i64, lshift: i64) -> bool {
     // Frame header: magic, Frame_Header_Descriptor (single segment, 8-byte content size,
     // content checksum), the content size.
     put_le(out, 4247762216, 4);
     out.push(0xE4);
     put_le(out, data.len as i64, 8);
-    // Entries hold position + base; entries of earlier calls are below this call's base, so
-    // they are never candidates. The base only restarts, with cleared tables, past 2^30.
-    if ctx.base + data.len as i64 + 2 > 1073741824 {
-        for i in 65536 { ctx.head[i] = 0; }
-        for i in 131072 { ctx.longt[i] = 0; }
-        ctx.base = 1;
-    }
     var reps: i64[3] = [1, 4, 8];
     var start: i64 = 0;
     if data.len == 0 {
@@ -1498,7 +1498,7 @@ fn compress_with(ctx: EncCtx&, data: const u8[:], out: u8[>..]&) -> bool {
         let end = min(data.len, start + BLOCK_MAX);
         let last = end == data.len;
         var blkbuf: u8[>..] = [];
-        compress_block(data, start, end, ctx, reps[0..3], blkbuf);
+        compress_block(data, start, end, head, longt, base, hshift, lshift, reps[0..3], blkbuf);
         // The first byte of the block header carries the last-block flag.
         if last {
             blkbuf[0] = blkbuf[0] | 1;
@@ -1508,8 +1508,23 @@ fn compress_with(ctx: EncCtx&, data: const u8[:], out: u8[>..]&) -> bool {
     }
     let sum = xxh64(data[0..data.len]) & 4294967295;
     put_le(out, sum as i64, 4);
-    ctx.base = ctx.base + data.len as i64 + 1;
     return true;
+}
+
+fn compress_with(ctx: EncCtx&, data: const u8[:], out: u8[>..]&) -> bool {
+    // Entries hold position + base; entries of earlier calls are below this call's base, so
+    // they are never candidates. The base only restarts, with cleared tables, past 2^30.
+    if ctx.base + data.len as i64 + 2 > 1073741824 {
+        for i in 65536 { ctx.head[i] = 0; }
+        for i in 131072 { ctx.longt[i] = 0; }
+        ctx.base = 1;
+    }
+    // Same index shifts as compress(): table size follows the input length.
+    let hb = highbit(data.len as i64) + 1;
+    let ok = encode_frame(data, out, ctx.head[0..65536], ctx.longt[0..131072], ctx.base,
+                          16 - min(16, max(10, hb)), 17 - min(17, max(10, hb + 1)));
+    ctx.base = ctx.base + data.len as i64 + 1;
+    return ok;
 }
 
 // Encoder state kept between calls: hash tables of positions (stored with an offset, see
