@@ -13,6 +13,8 @@ Learn Goose through a binary-safe LZ78 library and a separate multi-file archive
 - `README.md`: public API and build/use instructions; `FORMAT.md`: archive contract; `EXPERIMENTS.md`: learning history.
 - `LICENSE`: repository MIT license; `NOTICE`: retained original funcfinder copyright/license notice.
 - `archiver/`: separate codecs, CLI, format/memory documentation and independent tests; see its local AGENTS.md and licenses.
+- `experiments/`: original learning program and timing history; its local contract owns reproduction.
+- `benchmarks/`: independent C comparison and timing drivers; its local contract owns methodology and measurement limits.
 
 ## Local Contracts
 
@@ -37,6 +39,9 @@ Learn Goose through a binary-safe LZ78 library and a separate multi-file archive
 
 ## Child DOX Index
 
+- `experiments/` — original LZ78 learning source; see [experiments/AGENTS.md](experiments/AGENTS.md).
+
 - `archiver/` — standalone archiver contracts; see [archiver/AGENTS.md](archiver/AGENTS.md).
 
+- `benchmarks/` — independent C codec comparison; see [benchmarks/AGENTS.md](benchmarks/AGENTS.md).
 - This document owns examples/ and test/ directly.

@@ -15,6 +15,8 @@ test/roundtrip.goose    Goose API checks
 test/verify.py          independent Python codec and cross-checks
 FORMAT.md              versioned archive format
 EXPERIMENTS.md          measured optimizations and learning notes
+benchmarks/            independent C comparison and timing methodology
+experiments/           original learning program and historical timing driver
 archiver/              BZip2, real 7z and GARC0001 tools, tests and memory notes
 LICENSE                MIT
 ```
@@ -114,3 +116,14 @@ at `929f9de0a20a570289ee822d813cf2425d01960f` and the
 No reference-project source code or data is included. Its `.mz` format is not compatible.
 
 MIT; see [LICENSE](LICENSE) and the original attribution in [NOTICE](NOTICE).
+
+## Comparison with C
+
+The controlled Windows/MSVC experiment compares the same archive format and
+hash-table rules, plus output-range and classic parent-chain C decoders. On
+1 MiB text, compression is 9.025 ms Goose / 9.369 ms C; decoding is 1.061 ms
+Goose / 1.206 ms C ranges / 5.122 ms C parent chains. These are implementation
+measurements on one machine, not a universal language ranking.
+See [methodology, all datasets and reproduction commands](benchmarks/README.md).
+
+The [original learning program](experiments/original-lz78/README.md) is retained separately from the public library.
