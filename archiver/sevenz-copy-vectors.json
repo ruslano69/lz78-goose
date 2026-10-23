@@ -1,0 +1,66 @@
+{
+  "protocol": "goose.sevenz-copy-vectors/v1",
+  "scope": "Uncompressed header, non-solid Copy; not a Goose writer implementation",
+  "cases": [
+    {
+      "name": "empty",
+      "sha256": "2c1877e12f1c07776cea1ae8e37722ee35c6cbebd4b663b72809ce3a23b78b0e",
+      "archive_hex": "37 7a bc af 27 1c 00 04 08 a8 34 b8 00 00 00 00 00 00 00 00 02 00 00 00 00 00 00 00 be 23 c2 58 01 00",
+      "entries": []
+    },
+    {
+      "name": "one",
+      "sha256": "ab30abd02a8bc0489f0307418f9b7cf63adde75b59ce2c8a3d263941c22ae550",
+      "archive_hex": "37 7a bc af 27 1c 00 04 ac 77 d0 c3 03 00 00 00 00 00 00 00 2e 00 00 00 00 00 00 00 88 58 88 ba 61 62 63 01 04 06 00 01 09 03 00 07 0b 01 00 01 01 00 0c 03 0a 01 c2 41 24 35 00 08 00 00 05 01 11 0d 00 61 00 2e 00 74 00 78 00 74 00 00 00 00 00",
+      "entries": [
+        {
+          "path": "a.txt",
+          "kind": "file",
+          "mtime_filetime": null,
+          "data_hex": "616263"
+        }
+      ]
+    },
+    {
+      "name": "mixed",
+      "sha256": "4bffee53ce7ec6f99394a763420a354979cdc3720367b81736a51b5015587feb",
+      "archive_hex": "37 7a bc af 27 1c 00 04 bd 93 5d 8e 10 00 00 00 00 00 00 00 c9 00 00 00 00 00 00 00 82 72 00 b1 61 62 63 d0 93 d1 83 d1 81 d1 8c 0a 62 69 72 64 01 04 06 00 03 09 03 09 04 00 07 0b 03 00 01 01 00 01 01 00 01 01 00 0c 03 09 04 0a 01 c2 41 24 35 eb 6e 49 dc 0e ae bb a0 00 08 00 00 05 06 0e 01 b0 0f 01 40 11 73 00 64 00 6f 00 63 00 73 00 00 00 64 00 6f 00 63 00 73 00 2f 00 61 00 2e 00 74 00 78 00 74 00 00 00 64 00 6f 00 63 00 73 00 2f 00 65 00 6d 00 70 00 74 00 79 00 2e 00 74 00 78 00 74 00 00 00 76 00 61 00 63 00 61 00 6e 00 74 00 00 00 20 04 43 04 41 04 41 04 3a 04 38 04 39 04 2e 00 74 00 78 00 74 00 00 00 3d d8 26 dc 2e 00 74 00 78 00 74 00 00 00 14 1b 00 c8 00 00 00 6d c6 47 17 da 01 00 00 6d c6 47 17 da 01 00 00 6d c6 47 17 da 01 00 00",
+      "entries": [
+        {
+          "path": "docs",
+          "kind": "directory",
+          "mtime_filetime": 133444736000000000
+        },
+        {
+          "path": "docs/a.txt",
+          "kind": "file",
+          "mtime_filetime": 133444736000000000,
+          "data_hex": "616263"
+        },
+        {
+          "path": "docs/empty.txt",
+          "kind": "file",
+          "mtime_filetime": null,
+          "data_hex": ""
+        },
+        {
+          "path": "vacant",
+          "kind": "directory",
+          "mtime_filetime": null
+        },
+        {
+          "path": "Русский.txt",
+          "kind": "file",
+          "mtime_filetime": 133444736000000000,
+          "data_hex": "d093d183d181d18c0a"
+        },
+        {
+          "path": "🐦.txt",
+          "kind": "file",
+          "mtime_filetime": null,
+          "data_hex": "62697264"
+        }
+      ]
+    }
+  ]
+}

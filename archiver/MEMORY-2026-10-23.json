@@ -1,0 +1,656 @@
+{
+  "note": "Original pre-transfer measurements; absolute producer paths are provenance, not dependencies.",
+  "bzip2": {
+    "executable": "D:\\Dev\\Go\\funcfinder\\build\\goose-archive\\gbzip2.exe",
+    "sha256": "9a9b90954b2c9f0e826c61161d5466c04e794beca7619d4cbbfa90f7d47b1907",
+    "runs": 3,
+    "rows": [
+      {
+        "name": "empty",
+        "level": 1,
+        "original": 0,
+        "goose": 14,
+        "libbz2": 14,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "encode": [
+          {
+            "seconds": 0.04970840003807098,
+            "peak_ws": 7905280,
+            "peak_commit": 8757248
+          },
+          {
+            "seconds": 0.026956800022162497,
+            "peak_ws": 7905280,
+            "peak_commit": 8765440
+          },
+          {
+            "seconds": 0.021679099998436868,
+            "peak_ws": 7909376,
+            "peak_commit": 8765440
+          }
+        ],
+        "decode": [
+          {
+            "seconds": 0.022368600009940565,
+            "peak_ws": 7897088,
+            "peak_commit": 7692288
+          },
+          {
+            "seconds": 0.02195449999999255,
+            "peak_ws": 7897088,
+            "peak_commit": 7696384
+          },
+          {
+            "seconds": 0.02280189999146387,
+            "peak_ws": 7897088,
+            "peak_commit": 7696384
+          }
+        ]
+      },
+      {
+        "name": "empty",
+        "level": 3,
+        "original": 0,
+        "goose": 14,
+        "libbz2": 14,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "encode": [
+          {
+            "seconds": 0.024568499997258186,
+            "peak_ws": 7905280,
+            "peak_commit": 8757248
+          },
+          {
+            "seconds": 0.022489599999971688,
+            "peak_ws": 7901184,
+            "peak_commit": 8736768
+          },
+          {
+            "seconds": 0.021791099978145212,
+            "peak_ws": 7909376,
+            "peak_commit": 8761344
+          }
+        ],
+        "decode": [
+          {
+            "seconds": 0.020651100028771907,
+            "peak_ws": 7897088,
+            "peak_commit": 7704576
+          },
+          {
+            "seconds": 0.02170849998947233,
+            "peak_ws": 7892992,
+            "peak_commit": 7700480
+          },
+          {
+            "seconds": 0.021645799977704883,
+            "peak_ws": 7905280,
+            "peak_commit": 7700480
+          }
+        ]
+      },
+      {
+        "name": "empty",
+        "level": 9,
+        "original": 0,
+        "goose": 14,
+        "libbz2": 14,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "encode": [
+          {
+            "seconds": 0.023333100019954145,
+            "peak_ws": 7901184,
+            "peak_commit": 8757248
+          },
+          {
+            "seconds": 0.027211699984036386,
+            "peak_ws": 7905280,
+            "peak_commit": 8761344
+          },
+          {
+            "seconds": 0.0217617999878712,
+            "peak_ws": 7905280,
+            "peak_commit": 8753152
+          }
+        ],
+        "decode": [
+          {
+            "seconds": 0.02086709998548031,
+            "peak_ws": 7901184,
+            "peak_commit": 7696384
+          },
+          {
+            "seconds": 0.02092189999530092,
+            "peak_ws": 7892992,
+            "peak_commit": 7696384
+          },
+          {
+            "seconds": 0.01887849997729063,
+            "peak_ws": 7901184,
+            "peak_commit": 7712768
+          }
+        ]
+      },
+      {
+        "name": "text_300k",
+        "level": 1,
+        "original": 300000,
+        "goose": 18733,
+        "libbz2": 18957,
+        "sha256": "a295854cf25e525005c651a829bba12bf985dba0e1a39ad3eb104447896aceef",
+        "encode": [
+          {
+            "seconds": 0.08154250000370666,
+            "peak_ws": 10248192,
+            "peak_commit": 12992512
+          },
+          {
+            "seconds": 0.08186060003936291,
+            "peak_ws": 10141696,
+            "peak_commit": 12992512
+          },
+          {
+            "seconds": 0.07823719998123124,
+            "peak_ws": 10248192,
+            "peak_commit": 12992512
+          }
+        ],
+        "decode": [
+          {
+            "seconds": 0.02492499997606501,
+            "peak_ws": 8712192,
+            "peak_commit": 8757248
+          },
+          {
+            "seconds": 0.023415900010149926,
+            "peak_ws": 8708096,
+            "peak_commit": 8753152
+          },
+          {
+            "seconds": 0.024027500010561198,
+            "peak_ws": 8708096,
+            "peak_commit": 8761344
+          }
+        ]
+      },
+      {
+        "name": "text_300k",
+        "level": 3,
+        "original": 300000,
+        "goose": 7489,
+        "libbz2": 7579,
+        "sha256": "a295854cf25e525005c651a829bba12bf985dba0e1a39ad3eb104447896aceef",
+        "encode": [
+          {
+            "seconds": 0.09280829998897389,
+            "peak_ws": 13598720,
+            "peak_commit": 17190912
+          },
+          {
+            "seconds": 0.0988756999722682,
+            "peak_ws": 13598720,
+            "peak_commit": 17199104
+          },
+          {
+            "seconds": 0.11126229999354109,
+            "peak_ws": 13594624,
+            "peak_commit": 17195008
+          }
+        ],
+        "decode": [
+          {
+            "seconds": 0.026280299993231893,
+            "peak_ws": 9478144,
+            "peak_commit": 9797632
+          },
+          {
+            "seconds": 0.024474299978464842,
+            "peak_ws": 9490432,
+            "peak_commit": 9814016
+          },
+          {
+            "seconds": 0.023735800001304597,
+            "peak_ws": 9486336,
+            "peak_commit": 9818112
+          }
+        ]
+      },
+      {
+        "name": "text_300k",
+        "level": 9,
+        "original": 300000,
+        "goose": 7489,
+        "libbz2": 7542,
+        "sha256": "a295854cf25e525005c651a829bba12bf985dba0e1a39ad3eb104447896aceef",
+        "encode": [
+          {
+            "seconds": 0.09365789999719709,
+            "peak_ws": 13598720,
+            "peak_commit": 17199104
+          },
+          {
+            "seconds": 0.10110779997194186,
+            "peak_ws": 13598720,
+            "peak_commit": 17199104
+          },
+          {
+            "seconds": 0.0851812000037171,
+            "peak_ws": 13598720,
+            "peak_commit": 17203200
+          }
+        ],
+        "decode": [
+          {
+            "seconds": 0.027830899984110147,
+            "peak_ws": 9482240,
+            "peak_commit": 9805824
+          },
+          {
+            "seconds": 0.026943999982904643,
+            "peak_ws": 9478144,
+            "peak_commit": 9809920
+          },
+          {
+            "seconds": 0.028969099977985024,
+            "peak_ws": 9486336,
+            "peak_commit": 9805824
+          }
+        ]
+      },
+      {
+        "name": "text_2100k",
+        "level": 1,
+        "original": 2100000,
+        "goose": 131116,
+        "libbz2": 132443,
+        "sha256": "45908ba961f69a2514f1c89ab6d99c8504d1f2a08fbd5fc9d4d77472f601cdd1",
+        "encode": [
+          {
+            "seconds": 0.5173114000353962,
+            "peak_ws": 12263424,
+            "peak_commit": 15097856
+          },
+          {
+            "seconds": 0.40747279999777675,
+            "peak_ws": 12206080,
+            "peak_commit": 15097856
+          },
+          {
+            "seconds": 0.34639570000581443,
+            "peak_ws": 12206080,
+            "peak_commit": 15081472
+          }
+        ],
+        "decode": [
+          {
+            "seconds": 0.04519460001029074,
+            "peak_ws": 10719232,
+            "peak_commit": 10862592
+          },
+          {
+            "seconds": 0.04079930001171306,
+            "peak_ws": 10715136,
+            "peak_commit": 10854400
+          },
+          {
+            "seconds": 0.03989259997615591,
+            "peak_ws": 10661888,
+            "peak_commit": 10850304
+          }
+        ]
+      },
+      {
+        "name": "text_2100k",
+        "level": 3,
+        "original": 2100000,
+        "goose": 52418,
+        "libbz2": 52865,
+        "sha256": "45908ba961f69a2514f1c89ab6d99c8504d1f2a08fbd5fc9d4d77472f601cdd1",
+        "encode": [
+          {
+            "seconds": 0.6041093000094406,
+            "peak_ws": 15478784,
+            "peak_commit": 19296256
+          },
+          {
+            "seconds": 0.5359700000262819,
+            "peak_ws": 15478784,
+            "peak_commit": 19300352
+          },
+          {
+            "seconds": 0.6254676000098698,
+            "peak_ws": 15482880,
+            "peak_commit": 19304448
+          }
+        ],
+        "decode": [
+          {
+            "seconds": 0.0848894999944605,
+            "peak_ws": 11358208,
+            "peak_commit": 11898880
+          },
+          {
+            "seconds": 0.1148471999913454,
+            "peak_ws": 11362304,
+            "peak_commit": 11915264
+          },
+          {
+            "seconds": 0.0469007000210695,
+            "peak_ws": 11362304,
+            "peak_commit": 11907072
+          }
+        ]
+      },
+      {
+        "name": "text_2100k",
+        "level": 9,
+        "original": 2100000,
+        "goose": 25035,
+        "libbz2": 25143,
+        "sha256": "45908ba961f69a2514f1c89ab6d99c8504d1f2a08fbd5fc9d4d77472f601cdd1",
+        "encode": [
+          {
+            "seconds": 0.7638206999981776,
+            "peak_ws": 25489408,
+            "peak_commit": 27701248
+          },
+          {
+            "seconds": 0.6924036999698728,
+            "peak_ws": 25493504,
+            "peak_commit": 27705344
+          },
+          {
+            "seconds": 0.7483323999913409,
+            "peak_ws": 25489408,
+            "peak_commit": 27705344
+          }
+        ],
+        "decode": [
+          {
+            "seconds": 0.05231060000369325,
+            "peak_ws": 13692928,
+            "peak_commit": 14008320
+          },
+          {
+            "seconds": 0.05389959999592975,
+            "peak_ws": 13635584,
+            "peak_commit": 13991936
+          },
+          {
+            "seconds": 0.05727549997391179,
+            "peak_ws": 13701120,
+            "peak_commit": 14012416
+          }
+        ]
+      },
+      {
+        "name": "random_2100k",
+        "level": 1,
+        "original": 2100000,
+        "goose": 2116963,
+        "libbz2": 2117057,
+        "sha256": "03584011cd1079fc5288267dcb7ae7352433e015a91cf1d362b0873c14424026",
+        "encode": [
+          {
+            "seconds": 0.36940689996117726,
+            "peak_ws": 14454784,
+            "peak_commit": 17207296
+          },
+          {
+            "seconds": 0.3619223000132479,
+            "peak_ws": 14446592,
+            "peak_commit": 17195008
+          },
+          {
+            "seconds": 0.3551494000130333,
+            "peak_ws": 14454784,
+            "peak_commit": 17199104
+          }
+        ],
+        "decode": [
+          {
+            "seconds": 0.14502240001456812,
+            "peak_ws": 12685312,
+            "peak_commit": 12963840
+          },
+          {
+            "seconds": 0.14016860001720488,
+            "peak_ws": 12623872,
+            "peak_commit": 12947456
+          },
+          {
+            "seconds": 0.14033230004133657,
+            "peak_ws": 12685312,
+            "peak_commit": 12951552
+          }
+        ]
+      },
+      {
+        "name": "random_2100k",
+        "level": 3,
+        "original": 2100000,
+        "goose": 2112212,
+        "libbz2": 2112411,
+        "sha256": "03584011cd1079fc5288267dcb7ae7352433e015a91cf1d362b0873c14424026",
+        "encode": [
+          {
+            "seconds": 0.3799758999957703,
+            "peak_ws": 18190336,
+            "peak_commit": 21413888
+          },
+          {
+            "seconds": 0.3749092999496497,
+            "peak_ws": 18141184,
+            "peak_commit": 21381120
+          },
+          {
+            "seconds": 0.3699593000346795,
+            "peak_ws": 18186240,
+            "peak_commit": 21401600
+          }
+        ],
+        "decode": [
+          {
+            "seconds": 0.1565598000306636,
+            "peak_ws": 13471744,
+            "peak_commit": 14012416
+          },
+          {
+            "seconds": 0.1542349000228569,
+            "peak_ws": 13475840,
+            "peak_commit": 14016512
+          },
+          {
+            "seconds": 0.1580744000384584,
+            "peak_ws": 13471744,
+            "peak_commit": 14012416
+          }
+        ]
+      },
+      {
+        "name": "random_2100k",
+        "level": 9,
+        "original": 2100000,
+        "goose": 2109827,
+        "libbz2": 2109817,
+        "sha256": "03584011cd1079fc5288267dcb7ae7352433e015a91cf1d362b0873c14424026",
+        "encode": [
+          {
+            "seconds": 0.3792119999998249,
+            "peak_ws": 29396992,
+            "peak_commit": 30855168
+          },
+          {
+            "seconds": 0.4000003000255674,
+            "peak_ws": 29396992,
+            "peak_commit": 30863360
+          },
+          {
+            "seconds": 0.3700346000259742,
+            "peak_ws": 29356032,
+            "peak_commit": 30851072
+          }
+        ],
+        "decode": [
+          {
+            "seconds": 0.17670469998847693,
+            "peak_ws": 15847424,
+            "peak_commit": 16117760
+          },
+          {
+            "seconds": 0.1572471999679692,
+            "peak_ws": 15847424,
+            "peak_commit": 16113664
+          },
+          {
+            "seconds": 0.16235249995952472,
+            "peak_ws": 15847424,
+            "peak_commit": 16113664
+          }
+        ]
+      }
+    ],
+    "source_sha256": {
+      "bwt.goose": "e7bf1d62696c81cee0268d7e722bd5a40cfbdcf7ab80f1c77edc1178ef17c896",
+      "bzip2_cli.goose": "3b88cbace22174689bfc89f96e0cac44ca98a14459dc299b338ec81d70f2e15f",
+      "bzip2_test.goose": "f5d4d309f8c7ee45d1314097d8188fe54ff50d887fce205b56699f34e643df3f",
+      "cli.goose": "89e26e867ee5ca9e31ff94397c83d383eaa5577ae0b3115700f0e1f340f07b67",
+      "garchive.goose": "08ff3306bb9276ab5f673691cf773d201d07535469f84b1bbf0855f2b7ad7550",
+      "gs7zapp.goose": "bdb819cd1c71952ca519c2e9c17f1aee31272c961bca31595494ff029a9ec68c",
+      "gsbzip2.goose": "9e3464b0c384926f3baa984fc5e9dae480928ccc27e9c6bd3780e7882dda7bb3",
+      "gshuffman.goose": "0640e2410b53ffd55d1d53ca6eeb78522b516650033da123d39066ccac0e69b8",
+      "gsmtf.goose": "19e381ded80de9bf0e22179afb98744319b3c2bf90b0dacb63f1281e3ad575ca",
+      "gsunicode.goose": "b4cd0e6cfc4cab76941a0052d79d2558dab7ddf8a519047956d9232478fb955f",
+      "gswinargs.goose": "36da785792c904da754f7365ec29672a1d37836c37195df6b6d8ca8e94807005",
+      "gswinfiles.goose": "a0269d4577acd2967183bf63f25cd6f46382924a7a0560a5308d54e504e01cb5",
+      "sais.goose": "a77534c2aabeb16bb4e6de38f3853ae9ceece37f91cdebb959528a5877985415",
+      "sevenzip.goose": "72284579ff106a2bc14e5ab06046246004ce2ab480e7982141069da4a94016dc",
+      "sevenzip_cli.goose": "e7059111c72a264c30b77c26efe41b02e0910cd9c879917a0c04763298a0925c",
+      "sevenz_test.goose": "bedc2b7f454451ce79e8c8d07e5ffc117d76fbc322d1058b6c29e2484827d19e",
+      "test.goose": "0a0d59e3f8a5044ef7c4fe250296679a7fe511e3fd161c2b84190dd01001433d"
+    }
+  },
+  "sevenz": {
+    "executable": "D:\\Dev\\Go\\funcfinder\\build\\goose-archive\\g7z.exe",
+    "executable_sha256": "14e36e4be754c13a21cc80af192b66fc2c5ec0c802c906a38f94a0f798e7cdb9",
+    "input_bytes": 16777216,
+    "input_sha256": "a93736fa2d2f7f987c5359cc3c36645eadfa267fe4cb630ad9f0bca05a7d0f0b",
+    "rows": [
+      {
+        "files": 1,
+        "level": 0,
+        "runs": [
+          {
+            "seconds": 0.10623080004006624,
+            "peak_ws": 41791488,
+            "peak_commit": 49803264,
+            "archive": 16777314
+          },
+          {
+            "seconds": 0.10623939998913556,
+            "peak_ws": 41783296,
+            "peak_commit": 49786880,
+            "archive": 16777314
+          },
+          {
+            "seconds": 0.1139048000331968,
+            "peak_ws": 41791488,
+            "peak_commit": 49795072,
+            "archive": 16777314
+          }
+        ]
+      },
+      {
+        "files": 1,
+        "level": 3,
+        "runs": [
+          {
+            "seconds": 2.680549799988512,
+            "peak_ws": 47824896,
+            "peak_commit": 57171968,
+            "archive": 16777314
+          },
+          {
+            "seconds": 2.6328577999956906,
+            "peak_ws": 47796224,
+            "peak_commit": 57176064,
+            "archive": 16777314
+          },
+          {
+            "seconds": 2.691512799996417,
+            "peak_ws": 47820800,
+            "peak_commit": 57176064,
+            "archive": 16777314
+          }
+        ]
+      },
+      {
+        "files": 16,
+        "level": 0,
+        "runs": [
+          {
+            "seconds": 0.11299669998697937,
+            "peak_ws": 41816064,
+            "peak_commit": 49811456,
+            "archive": 16777839
+          },
+          {
+            "seconds": 0.10895670001627877,
+            "peak_ws": 41816064,
+            "peak_commit": 49819648,
+            "archive": 16777839
+          },
+          {
+            "seconds": 0.10883739998098463,
+            "peak_ws": 41811968,
+            "peak_commit": 49811456,
+            "archive": 16777839
+          }
+        ]
+      },
+      {
+        "files": 16,
+        "level": 3,
+        "runs": [
+          {
+            "seconds": 2.8575495000113733,
+            "peak_ws": 47775744,
+            "peak_commit": 57188352,
+            "archive": 16777839
+          },
+          {
+            "seconds": 2.663860000029672,
+            "peak_ws": 47779840,
+            "peak_commit": 57192448,
+            "archive": 16777839
+          },
+          {
+            "seconds": 2.6349247000180185,
+            "peak_ws": 47779840,
+            "peak_commit": 57184256,
+            "archive": 16777839
+          }
+        ]
+      }
+    ],
+    "source_sha256": {
+      "bwt.goose": "e7bf1d62696c81cee0268d7e722bd5a40cfbdcf7ab80f1c77edc1178ef17c896",
+      "bzip2_cli.goose": "3b88cbace22174689bfc89f96e0cac44ca98a14459dc299b338ec81d70f2e15f",
+      "bzip2_test.goose": "f5d4d309f8c7ee45d1314097d8188fe54ff50d887fce205b56699f34e643df3f",
+      "cli.goose": "89e26e867ee5ca9e31ff94397c83d383eaa5577ae0b3115700f0e1f340f07b67",
+      "garchive.goose": "08ff3306bb9276ab5f673691cf773d201d07535469f84b1bbf0855f2b7ad7550",
+      "gs7zapp.goose": "bdb819cd1c71952ca519c2e9c17f1aee31272c961bca31595494ff029a9ec68c",
+      "gsbzip2.goose": "9e3464b0c384926f3baa984fc5e9dae480928ccc27e9c6bd3780e7882dda7bb3",
+      "gshuffman.goose": "0640e2410b53ffd55d1d53ca6eeb78522b516650033da123d39066ccac0e69b8",
+      "gsmtf.goose": "19e381ded80de9bf0e22179afb98744319b3c2bf90b0dacb63f1281e3ad575ca",
+      "gsunicode.goose": "b4cd0e6cfc4cab76941a0052d79d2558dab7ddf8a519047956d9232478fb955f",
+      "gswinargs.goose": "36da785792c904da754f7365ec29672a1d37836c37195df6b6d8ca8e94807005",
+      "gswinfiles.goose": "a0269d4577acd2967183bf63f25cd6f46382924a7a0560a5308d54e504e01cb5",
+      "sais.goose": "a77534c2aabeb16bb4e6de38f3853ae9ceece37f91cdebb959528a5877985415",
+      "sevenzip.goose": "72284579ff106a2bc14e5ab06046246004ce2ab480e7982141069da4a94016dc",
+      "sevenzip_cli.goose": "e7059111c72a264c30b77c26efe41b02e0910cd9c879917a0c04763298a0925c",
+      "sevenz_test.goose": "bedc2b7f454451ce79e8c8d07e5ffc117d76fbc322d1058b6c29e2484827d19e",
+      "test.goose": "0a0d59e3f8a5044ef7c4fe250296679a7fe511e3fd161c2b84190dd01001433d"
+    }
+  }
+}

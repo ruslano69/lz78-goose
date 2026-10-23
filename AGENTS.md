@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Learn Goose through a small binary-safe LZ78 library. The implemented algorithm is LZ78.
+Learn Goose through a binary-safe LZ78 library and a separate multi-file archiver. The root library implements LZ78; archiver/ owns BZip2, GARC0001 and the real 7z profile.
 
 ## Ownership
 
@@ -12,6 +12,7 @@ Learn Goose through a small binary-safe LZ78 library. The implemented algorithm 
 - `test/verify.py`: independent Python reference codec, byte-exact cross-checks and malformed-input tests.
 - `README.md`: public API and build/use instructions; `FORMAT.md`: archive contract; `EXPERIMENTS.md`: learning history.
 - `LICENSE`: repository MIT license; `NOTICE`: retained original funcfinder copyright/license notice.
+- `archiver/`: separate codecs, CLI, format/memory documentation and independent tests; see its local AGENTS.md and licenses.
 
 ## Local Contracts
 
@@ -23,7 +24,7 @@ Learn Goose through a small binary-safe LZ78 library. The implemented algorithm 
 
 ## Work Guidance
 
-- Map declarations before reading/editing them with funcfinder if available; Goose JSON code objects are not yet supported.
+- Map declarations before reading/editing with the active funcfinder. Goose supports JSON code objects: read the declaration, change source, preview, then apply the same request. Respect stale revisions and run compiler/tests.
 - Use compiler syntax/type/lifetime checks and independent Python verification before changing the codec. Navigation alone is not validation.
 
 ## Verification
@@ -36,4 +37,6 @@ Learn Goose through a small binary-safe LZ78 library. The implemented algorithm 
 
 ## Child DOX Index
 
-No child AGENTS.md files. This document owns examples/ and test/.
+- `archiver/` — standalone archiver contracts; see [archiver/AGENTS.md](archiver/AGENTS.md).
+
+- This document owns examples/ and test/ directly.

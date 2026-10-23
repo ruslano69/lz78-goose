@@ -15,11 +15,24 @@ test/roundtrip.goose    Goose API checks
 test/verify.py          independent Python codec and cross-checks
 FORMAT.md              versioned archive format
 EXPERIMENTS.md          measured optimizations and learning notes
+archiver/              BZip2, real 7z and GARC0001 tools, tests and memory notes
 LICENSE                MIT
 ```
 
 The library is pure Goose. It needs no `.build` sidecar, CMake project or Python
 package dependencies. Native executable builds require a C compiler supported by Goose.
+
+## Multi-file archiver
+
+The separate [archiver/](archiver/README.md) subtree provides a pure-Goose
+standard BZip2 codec, real 7z Copy/BZip2 archives and the original GARC0001
+block format. The Windows x64 `g7z` CLI creates, lists, tests and extracts
+multiple files, with Unicode paths and modification times. Ordinary 7-Zip
+reads its archives. Root `lz78.goose` and its format remain independent.
+
+See [build/use instructions](archiver/README.md), [7z profile](archiver/SEVENZ.md)
+and [buffer types, limits and memory measurements](archiver/BZIP2.md).
+SA-IS in this subtree is Apache-2.0; retain its local licenses and NOTICE.
 
 ## Use as a library
 

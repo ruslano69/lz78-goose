@@ -1,0 +1,2 @@
+# The benchmark seed is byte data: changing LF to CRLF changes its SHA-256.
+fixtures/memory-text.txt -text

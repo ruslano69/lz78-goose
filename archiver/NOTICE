@@ -1,0 +1,7 @@
+sais.goose adapts the SA-IS implementation and explanation in
+ruslano69/kanzi-rs, crates/kanzi/src/sais.rs (Apache License 2.0).
+Changes: Goose implementation, byte S/L flags, shared bucket scratch per induced
+pass, explicit level stack and arenas; reduced input retains its unique sentinel.
+The BWT wrapper, MTF/zero-run, Huffman and archive modules and other original files remain MIT.
+The included Apache license applies to sais.goose; retain this notice and both
+licenses when distributing the combined compressor.
