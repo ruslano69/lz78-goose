@@ -156,6 +156,8 @@ fn write_with_level(entries: const Entry[:], names: const u8[:], contents: const
         if e.offset > contents.len as u64 || e.size > contents.len as u64 - e.offset { return 1; }
     }
     out.resize(32, 0);
+    // One encoder state for every entry: its hash tables are reused, not cleared.
+    var zctx = zstd::enc_new();
     var packed_sizes: u64[>..] = []; var methods: u8[>..] = [];
     for e in entries {
         if e.size == 0 { continue; }
@@ -171,7 +173,7 @@ fn write_with_level(entries: const Entry[:], names: const u8[:], contents: const
             let bz: i64 = out.len as i64 - mark as i64;
             if bz > 0 && bz + 2 < input.len as i64 { bz_out.append(out[mark..out.len]); method = 1; }
             out.resize(mark);
-            if !zstd::compress(input, out) { return 1; }
+            if !zstd::compress_with(zctx, input, out) { return 1; }
             let zs: i64 = out.len as i64 - mark as i64;
             let beats_bzip2 = method == 0 || zs < bz;
             if zs > 0 && zs + 7 < input.len as i64 && beats_bzip2 { zs_out.append(out[mark..out.len]); method = 2; }

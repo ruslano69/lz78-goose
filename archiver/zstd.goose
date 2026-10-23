@@ -1301,7 +1301,8 @@ fn choose_seq_table(codes: i64[:], n: i64, nsym: i64, dnorm: i64[:], dacc: i64, 
 // `ov` (1..3 for repeat codes, offset + 3 otherwise) with literal length `ll`, returns the
 // offset and updates r in place.
 fn rep_update(ov: i64, ll: i64, r: i64[:]) -> i64 {
-    let ll0: i64 = if ll == 0 { 1 } else { 0 };
+    // 1 when the literal run is empty, without a data-dependent branch.
+    let ll0: i64 = 1 - min(ll, 1);
     if ov > 3 {
         let off = ov - 3;
         r[2] = r[1];
@@ -1327,7 +1328,7 @@ fn match_at(data: const u8[:], a: i64, p: i64, limit: i64) -> i64 {
 
 // Encodes data[start..end) as one block. r holds the repeat offsets at the block start and
 // is updated only when the block is written compressed; a raw block leaves it unchanged.
-fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: i32[:], r: i64[:], out: u8[>..]&) {
+fn compress_block(data: const u8[:], start: i64, end: i64, ctx: EncCtx&, r: i64[:], out: u8[>..]&) {
     var seqs: Seq[>..] = [];
     var lits: u8[>..] = [];
     var lit_start = start;
@@ -1364,10 +1365,10 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: 
             // Two tables, no chains: the long table hashes 8 bytes, the short one 4.
             let hl = hash8_zstd(data, p);
             let hs = hash4_zstd(data, p);
-            let cl = longt[hl] as i64;
-            let cs = head[hs] as i64;
-            longt[hl] = p as i32;
-            head[hs] = p as i32;
+            let cl = ctx.longt[hl] as i64 - ctx.base;
+            let cs = ctx.head[hs] as i64 - ctx.base;
+            ctx.longt[hl] = (p + ctx.base) as i32;
+            ctx.head[hs] = (p + ctx.base) as i32;
             if cl >= 0 && cl < p {
                 let l = match_at(data, cl, p, limit);
                 if l >= MIN_MATCH_ZSTD && l > best_len {
@@ -1392,12 +1393,15 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: 
             rep_update(best_ov, ll, rr);
             lits.append(data[lit_start..p]);
             // Fast search: only the last two positions of a match enter the hash chains.
-            var k = p + best_len - 2;
-            if k < p + 1 { k = p + 1; }
-            while k < p + best_len && k + 8 <= data.len {
-                longt[hash8_zstd(data, k)] = k as i32;
-                head[hash4_zstd(data, k)] = k as i32;
-                k += 1;
+            // The last two positions of the match, each if its 8 bytes are in the block.
+            let e1 = p + best_len - 2;
+            if e1 + 8 <= data.len {
+                ctx.longt[hash8_zstd(data, e1)] = (e1 + ctx.base) as i32;
+                ctx.head[hash4_zstd(data, e1)] = (e1 + ctx.base) as i32;
+            }
+            if e1 + 9 <= data.len {
+                ctx.longt[hash8_zstd(data, e1 + 1)] = (e1 + 1 + ctx.base) as i32;
+                ctx.head[hash4_zstd(data, e1 + 1)] = (e1 + 1 + ctx.base) as i32;
             }
             p += best_len;
             lit_start = p;
@@ -1410,13 +1414,13 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: 
     lits.append(data[lit_start..end]);
     // Block body: literals, sequence count, modes (all predefined), bitstream.
     var body: u8[>..] = [];
-    var raw_lits: u8[>..] = [];
-    put_literals(raw_lits, lits[0..lits.len]);
+    // Size of the raw literal section (header plus bytes), without building it.
+    let raw_len = (if lits.len < 32 { 1 } else if lits.len < 4096 { 2 } else { 3 }) + lits.len;
     var huf_lits: u8[>..] = [];
-    if put_compressed_literals(lits[0..lits.len], huf_lits) && huf_lits.len < raw_lits.len {
+    if put_compressed_literals(lits[0..lits.len], huf_lits) && huf_lits.len < raw_len {
         body.append(huf_lits[0..huf_lits.len]);
     } else {
-        body.append(raw_lits[0..raw_lits.len]);
+        put_literals(body, lits[0..lits.len]);
     }
     let n = seqs.len;
     if n == 0 {
@@ -1468,14 +1472,23 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: 
 
 // Compresses data as one zstd frame.
 fn compress(data: const u8[:], out: u8[>..]&) -> bool {
+    // Built in place: returning the 768 KB state from a function would copy it.
+    var ctx = EncCtx { [0; 65536], [0; 131072], 1 };
+    return compress_with(ctx, data, out);
+}
+fn compress_with(ctx: EncCtx&, data: const u8[:], out: u8[>..]&) -> bool {
     // Frame header: magic, Frame_Header_Descriptor (single segment, 8-byte content size,
     // content checksum), the content size.
     put_le(out, 4247762216, 4);
     out.push(0xE4);
     put_le(out, data.len as i64, 8);
-    var head: i32[65536] = [-1; 65536];
-    var longt: i32[>..] = [];
-    longt.resize(131072, -1);
+    // Entries hold position + base; entries of earlier calls are below this call's base, so
+    // they are never candidates. The base only restarts, with cleared tables, past 2^30.
+    if ctx.base + data.len as i64 + 2 > 1073741824 {
+        for i in 65536 { ctx.head[i] = 0; }
+        for i in 131072 { ctx.longt[i] = 0; }
+        ctx.base = 1;
+    }
     var reps: i64[3] = [1, 4, 8];
     var start: i64 = 0;
     if data.len == 0 {
@@ -1485,7 +1498,7 @@ fn compress(data: const u8[:], out: u8[>..]&) -> bool {
         let end = min(data.len, start + BLOCK_MAX);
         let last = end == data.len;
         var blkbuf: u8[>..] = [];
-        compress_block(data, start, end, head[0..65536], longt[0..longt.len], reps[0..3], blkbuf);
+        compress_block(data, start, end, ctx, reps[0..3], blkbuf);
         // The first byte of the block header carries the last-block flag.
         if last {
             blkbuf[0] = blkbuf[0] | 1;
@@ -1495,5 +1508,16 @@ fn compress(data: const u8[:], out: u8[>..]&) -> bool {
     }
     let sum = xxh64(data[0..data.len]) & 4294967295;
     put_le(out, sum as i64, 4);
+    ctx.base = ctx.base + data.len as i64 + 1;
     return true;
 }
+
+// Encoder state kept between calls: hash tables of positions (stored with an offset, see
+// compress_with) and the offset of the next call.
+struct EncCtx { head: i32[65536], longt: i32[131072], base: i64 }
+
+fn enc_new() -> EncCtx {
+    return EncCtx { [0; 65536], [0; 131072], 1 };
+}
+
+
