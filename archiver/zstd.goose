@@ -8,6 +8,8 @@ import std;
 let LL_BASE: i64[36] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 28, 32, 40, 48, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536];
 let LL_BITS: i64[36] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 let ML_BASE: i64[53] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 37, 39, 41, 43, 47, 51, 59, 67, 83, 99, 131, 259, 515, 1027, 2051, 4099, 8195, 16387, 32771, 65539];
+let LL_CODE_SMALL: u8[64] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 16, 17, 17, 18, 18, 19, 19, 20, 20, 20, 20, 21, 21, 21, 21, 22, 22, 22, 22, 22, 22, 22, 22, 23, 23, 23, 23, 23, 23, 23, 23, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24];
+let ML_CODE_SMALL: u8[128] = [0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 32, 33, 33, 34, 34, 35, 35, 36, 36, 36, 36, 37, 37, 37, 37, 38, 38, 38, 38, 38, 38, 38, 38, 39, 39, 39, 39, 39, 39, 39, 39, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42];
 let ML_BITS: i64[53] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 let LL_DEFAULT: i64[36] = [4, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 1, 1, 1, 1, 1, -1, -1, -1, -1];
 let ML_DEFAULT: i64[53] = [1, 4, 3, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1, -1, -1];
@@ -44,13 +46,8 @@ fn le32(d: const u8[:], i: i64) -> i64 {
 }
 
 fn highbit(x: i64) -> i64 {
-    var h: i64 = 0;
-    var v = x;
-    while v > 1 {
-        v = v >> 1;
-        h += 1;
-    }
-    return h;
+    // Position of the top set bit; 0 for 0 and 1.
+    return 63 - clz((x | 1) as u64);
 }
 
 // Reads k bits LSB first.
@@ -566,11 +563,9 @@ fn rotl64(x: u64, r: i64) -> u64 {
 }
 
 fn read64(d: const u8[:], i: i64) -> u64 {
-    var v: u64 = 0;
-    for k in 8 {
-        v = v | ((d[i + k] as u64) << ((8 * k) as u64));
-    }
-    return v;
+    // Unrolled: a loop with a fixed trip count still costs one mispredict per call.
+    return (d[i] as u64) | ((d[i + 1] as u64) << 8) | ((d[i + 2] as u64) << 16) | ((d[i + 3] as u64) << 24) |
+        ((d[i + 4] as u64) << 32) | ((d[i + 5] as u64) << 40) | ((d[i + 6] as u64) << 48) | ((d[i + 7] as u64) << 56);
 }
 
 fn xxh_round(acc: u64, input: u64) -> u64 {
@@ -779,21 +774,21 @@ fn bitw_add(out: u8[>..]&, bw: BitW&, value: i64, n: i64) {
     let v = (value & ((1 << n) - 1)) as u64;
     bw.acc = bw.acc | (v << (bw.count as u64));
     bw.count += n;
-    while bw.count >= 8 {
+    // Four bytes at a time: this branch is taken once per 32 bits instead of once per byte.
+    if bw.count >= 32 {
         out.push((bw.acc & 255) as u8);
-        bw.acc = bw.acc >> 8;
-        bw.count -= 8;
+        out.push(((bw.acc >> 8) & 255) as u8);
+        out.push(((bw.acc >> 16) & 255) as u8);
+        out.push(((bw.acc >> 24) & 255) as u8);
+        bw.acc = bw.acc >> 32;
+        bw.count -= 32;
     }
 }
 
 // Ends a backward stream: a sentinel 1 bit, then zero padding to a byte boundary.
 fn bitw_close(out: u8[>..]&, bw: BitW&) {
     bitw_add(out, bw, 1, 1);
-    if bw.count > 0 {
-        out.push((bw.acc & 255) as u8);
-    }
-    bw.acc = 0;
-    bw.count = 0;
+    bitw_pad(out, bw);
 }
 
 // Encodes sym from state (the state value lies in [size, 2*size)); returns the next state.
@@ -811,25 +806,13 @@ fn fse_init(ct: FseCt&, sym: i64) -> i64 {
 }
 
 fn ll_code(v: i64) -> i64 {
-    // Binary search for the last code whose base is not above v.
-    var lo: i64 = 0;
-    var hi: i64 = 35;
-    while lo < hi {
-        let mid = (lo + hi + 1) / 2;
-        if LL_BASE[mid] <= v { lo = mid; } else { hi = mid - 1; }
-    }
-    return lo;
+    if v < 64 { return LL_CODE_SMALL[v] as i64; }
+    return highbit(v) + 19;
 }
 
 fn ml_code(v: i64) -> i64 {
-    // Binary search for the last code whose base is not above v.
-    var lo: i64 = 0;
-    var hi: i64 = 52;
-    while lo < hi {
-        let mid = (lo + hi + 1) / 2;
-        if ML_BASE[mid] <= v { lo = mid; } else { hi = mid - 1; }
-    }
-    return lo;
+    if v < 128 { return ML_CODE_SMALL[v] as i64; }
+    return highbit(v - 3) + 36;
 }
 
 // Sequences of one block as a backward bitstream, in the order the decoder reads them.
@@ -900,9 +883,7 @@ fn hash4_zstd(data: const u8[:], p: i64) -> i64 {
     return ((v * 2654435761) >> (32 - HASH_BITS_ZSTD)) as i64;
 }
 fn hash8_zstd(data: const u8[:], p: i64) -> i64 {
-    var v: u64 = 0;
-    for k in 8 { v = v | ((data[p + k] as u64) << ((8 * k) as u64)); }
-    return ((v * 11400714819323198485) >> 47) as i64;
+    return ((read64(data, p) * 11400714819323198485) >> 47) as i64;
 }
 
 // Length-limited Huffman code lengths (Kraft-exact repair, as zlib-style builders).
@@ -1141,8 +1122,10 @@ fn put_compressed_literals(lits: const u8[:], out: u8[>..]&) -> bool {
 
 // Forward bitstream padding (no sentinel): pending bits go out in whole bytes.
 fn bitw_pad(out: u8[>..]&, bw: BitW&) {
-    if bw.count > 0 {
+    while bw.count > 0 {
         out.push((bw.acc & 255) as u8);
+        bw.acc = bw.acc >> 8;
+        bw.count -= 8;
     }
     bw.acc = 0;
     bw.count = 0;
