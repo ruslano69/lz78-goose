@@ -80,7 +80,10 @@ fn bwd_read(src: const u8[:], r: Bwd&, k: i64) -> i64 {
     if k == 0 { return 0; }
     let lo = r.pos - k;
     var v: i64 = 0;
-    if lo >= 0 {
+    if lo >= 0 && (lo >> 3) + 8 <= src.len {
+        // Eight bytes from the byte holding the lowest bit; k <= 32 and the shift is below 8.
+        v = ((read64(src, lo >> 3) >> ((lo & 7) as u64)) as i64) & ((1 << k) - 1);
+    } else if lo >= 0 {
         let shift = lo & 7;
         var acc: i64 = 0;
         var j = lo >> 3;
@@ -509,9 +512,7 @@ fn sequences(blk: const u8[:], lits: const u8[:], out: u8[>..]&, frame_start: i6
         if r.pos < 0 { return false; }
         // Literals first, then the match from the window (RFC 8878 3.1.1.3.2.2).
         if lp + ll > lits.len { return false; }
-        for k in ll {
-            out.push(lits[lp + k]);
-        }
+        if ll > 0 { out.append(lits[lp..lp + ll]); }
         lp += ll;
         let ll0: i64 = if ll == 0 { 1 } else { 0 };
         var offset: i64 = 0;
@@ -534,8 +535,18 @@ fn sequences(blk: const u8[:], lits: const u8[:], out: u8[>..]&, frame_start: i6
         }
         let produced = out.len - frame_start;
         if offset <= 0 || offset > produced { return false; }
-        for k in ml {
-            out.push(out[out.len - offset]);
+        // Source before the end of the output: one copy when it does not overlap what is
+        // written, else the repeating pattern is extended by doubling chunks.
+        let base = out.len - offset;
+        if offset >= ml {
+            out.append(out[base..base + ml]);
+        } else {
+            var rem = ml;
+            while rem > 0 {
+                let c = min(rem, out.len - base);
+                out.append(out[base..base + c]);
+                rem -= c;
+            }
         }
     }
     if lp < lits.len {
@@ -562,7 +573,7 @@ fn rotl64(x: u64, r: i64) -> u64 {
     return (x << (r as u64)) | (x >> ((64 - r) as u64));
 }
 
-fn read64(d: const u8[:], i: i64) -> u64 {
+inline fn read64(d: const u8[:], i: i64) -> u64 {
     // One bounds check for the whole word, then constant indices into the slice.
     let c = d[i..i + 8];
     return (c[0] as u64) | ((c[1] as u64) << 8) | ((c[2] as u64) << 16) | ((c[3] as u64) << 24) |
