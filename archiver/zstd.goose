@@ -709,7 +709,7 @@ fn decompress(data: const u8[:], out: u8[>..]&) -> bool {
 let BLOCK_MAX: i64 = 131072;
 let MIN_MATCH_ZSTD: i64 = 3;
 let HASH_BITS_ZSTD: i64 = 16;
-let CHAIN_DEPTH: i64 = 16;
+let CHAIN_DEPTH: i64 = 4;
 let NICE_LEN_ZSTD: i64 = 128;
 
 struct FseCt { tl: i64, tbl: u16[512], dnb: i64[64], dfind: i64[64] }
@@ -798,33 +798,43 @@ fn bitw_close(out: u8[>..]&, bw: BitW&) {
 }
 
 // Encodes sym from state (the state value lies in [size, 2*size)); returns the next state.
-fn fse_put(out: u8[>..]&, bw: BitW&, ct: FseCt, state: i64, sym: i64) -> i64 {
+fn fse_put(out: u8[>..]&, bw: BitW&, ct: FseCt&, state: i64, sym: i64) -> i64 {
     let nb = (state + ct.dnb[sym]) >> 16;
     bitw_add(out, bw, state, nb);
     return ct.tbl[((state >> nb) + ct.dfind[sym]) as i64] as i64;
 }
 
 // The initial state for sym (libzstd's FSE_initCState2); writes no bits.
-fn fse_init(ct: FseCt, sym: i64) -> i64 {
+fn fse_init(ct: FseCt&, sym: i64) -> i64 {
     let nb = (ct.dnb[sym] + (1 << 15)) >> 16;
     let v = (nb << 16) - ct.dnb[sym];
     return ct.tbl[((v >> nb) + ct.dfind[sym]) as i64] as i64;
 }
 
 fn ll_code(v: i64) -> i64 {
-    var c: i64 = 35;
-    while LL_BASE[c] > v { c -= 1; }
-    return c;
+    // Binary search for the last code whose base is not above v.
+    var lo: i64 = 0;
+    var hi: i64 = 35;
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        if LL_BASE[mid] <= v { lo = mid; } else { hi = mid - 1; }
+    }
+    return lo;
 }
 
 fn ml_code(v: i64) -> i64 {
-    var c: i64 = 52;
-    while ML_BASE[c] > v { c -= 1; }
-    return c;
+    // Binary search for the last code whose base is not above v.
+    var lo: i64 = 0;
+    var hi: i64 = 52;
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        if ML_BASE[mid] <= v { lo = mid; } else { hi = mid - 1; }
+    }
+    return lo;
 }
 
 // Sequences of one block as a backward bitstream, in the order the decoder reads them.
-fn encode_sequences(seqs: Seq[:], ll_ct: FseCt, of_ct: FseCt, ml_ct: FseCt, out: u8[>..]&) {
+fn encode_sequences(seqs: Seq[:], ll_ct: FseCt&, of_ct: FseCt&, ml_ct: FseCt&, out: u8[>..]&) {
     let n = seqs.len;
     var bw = BitW { 0, 0 };
     let last = seqs[n - 1];
@@ -859,7 +869,7 @@ fn encode_sequences(seqs: Seq[:], ll_ct: FseCt, of_ct: FseCt, ml_ct: FseCt, out:
     bitw_close(out, bw);
 }
 
-fn of_size(ct: FseCt) -> i64 {
+fn of_size(ct: FseCt&) -> i64 {
     return 1 << ct.tl;
 }
 
@@ -1390,7 +1400,9 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], prev: i
             seqs.push(Seq { ll, best_len, best_ov });
             rep_update(best_ov, ll, rr);
             lits.append(data[lit_start..p]);
-            var k = p + 1;
+            // Fast search: only the last two positions of a match enter the hash chains.
+            var k = p + best_len - 2;
+            if k < p + 1 { k = p + 1; }
             while k < p + best_len && k + 4 <= data.len {
                 let h2 = hash4_zstd(data, k);
                 prev[k] = head[h2];

@@ -11,7 +11,7 @@
 - `garchive.goose`: versioned block container, CRC32 and public compress/decompress API.
 - `gsmtf.goose`, `gshuffman.goose`: reversible transforms and bounded entropy coding.
 - `gsbzip2.goose`: standard modern BZip2 streams, cyclic BWT and bounded decoder.
-- `zstd.goose`: RFC 8878 zstd decoder (all block types, Huffman and FSE tables, repeat offsets, checksum) and encoder (single-segment frames; Huffman literals with direct or FSE-coded weights; per-block FSE sequence tables chosen against the predefined ones; repeat offsets; hash-chain greedy matches, depth 16, search step grows by one per 128 misses so incompressible data is stored fast).
+- `zstd.goose`: RFC 8878 zstd decoder (all block types, Huffman and FSE tables, repeat offsets, checksum) and encoder (single-segment frames; Huffman literals with direct or FSE-coded weights; per-block FSE sequence tables chosen against the predefined ones; repeat offsets; fast greedy matches: hash chains of depth 4, only the last two positions of each match are hashed, search step grows by one per 128 misses).
 - `bzip2_cli.goose`, `bzip2_test.goose`, `verify_bzip2.py`: standalone gbzip2 and independent interoperability/refusal checks.
 - `BZIP2.md`, `bench_bzip2_memory.py`, `bench_sevenz_memory.py`: buffer types/lifetimes, block policy and Windows whole-process peak measurements.
 - `bwt.goose`, `sais.goose`: existing BWT/SA-IS implementation; preserve licenses/NOTICE.
