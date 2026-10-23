@@ -4,7 +4,9 @@
 Builds gzstd from zstd_cli.goose, then for every corpus file and level:
   - the reference `zstd -d` must restore the bytes that gzstd compressed (encoder check);
   - gzstd must restore the bytes that the reference `zstd` compressed (decoder check).
-Checks run on skippable-frame and multi-frame streams too. Exit status 0 only if all pass.
+Checks run on skippable-frame and multi-frame streams too. Hand-built frames then check what a
+decoder of untrusted input must refuse: an output past the caller's limit, a block over 128 KiB, and a
+Frame_Content_Size that is not the decoded size. Exit status 0 only if all pass.
 
 Usage: python3 archiver/verify_zstd.py --goose PATH/TO/goose --zstd PATH/TO/zstd --out OUTDIR
 """
@@ -14,6 +16,7 @@ import os
 import pathlib
 import random
 import shutil
+import struct
 import subprocess
 import sys
 
@@ -34,6 +37,37 @@ def corpus():
     items["sources"] = text
     items["sources_x3"] = text * 3
     return items
+
+
+def block(kind, size, last, payload=b""):
+    """Block_Header (last flag, type, size) followed by the payload."""
+    return struct.pack("<I", last | (kind << 1) | (size << 3))[:3] + payload
+
+
+def frame(fcs, blocks, fcs_flag=3):
+    """Single-segment frame without checksum; fcs is the declared Frame_Content_Size."""
+    width = {0: 1, 1: 2, 2: 4, 3: 8}[fcs_flag]
+    value = fcs - 256 if fcs_flag == 1 else fcs
+    return b"\x28\xb5\x2f\xfd" + bytes([(fcs_flag << 6) | 0x20]) + value.to_bytes(width, "little") + b"".join(blocks)
+
+
+def hostile_cases():
+    """(name, frame bytes, decode limit or None, must be accepted)."""
+    rle = lambda size, last, byte=b"A": block(1, size, last, byte)
+    sizes = 131072
+    return [
+        ("exact content size", frame(3 * sizes, [rle(sizes, 0), rle(sizes, 0), rle(sizes, 1)]), None, True),
+        ("two-byte content size", frame(300, [rle(300, 1)], fcs_flag=1), None, True),
+        ("limit equal to output", frame(3 * sizes, [rle(sizes, 0), rle(sizes, 0), rle(sizes, 1)]), 3 * sizes, True),
+        ("100 RLE blocks over the limit", frame(100 * sizes, [rle(sizes, 0)] * 99 + [rle(sizes, 1)]), 1000000, False),
+        ("RLE block of 2 MB", frame(2000000, [rle(2000000, 1)]), None, False),
+        ("raw block of 128 KiB + 1", frame(sizes + 1, [block(0, sizes + 1, 1, b"x" * (sizes + 1))]), None, False),
+        ("content size below the output", frame(5, [rle(100, 1)]), None, False),
+        ("content size above the output", frame(200, [rle(100, 1)]), None, False),
+        ("content size with the top bit set", frame(2 ** 63 + 5, [rle(10, 1)]), None, False),
+        ("content size above the limit", frame(10 ** 12, [rle(10, 1)]), 1000, False),
+        ("two frames over the limit", frame(600000, [rle(sizes, 0)] * 4 + [rle(600000 - 4 * sizes, 1)]) * 2, 1000000, False),
+    ]
 
 
 def run(args, check=True):
@@ -87,6 +121,18 @@ def main():
                 else:
                     failures += 1
                     print("FAIL decoder:", name, level, result.stderr.strip())
+        for name, data, limit, accepted in hostile_cases():
+            total += 1
+            crafted = out / "hostile.zst"
+            crafted.write_bytes(data)
+            result_file = out / "hostile.out"
+            if result_file.exists():
+                result_file.unlink()
+            command = [str(gzstd), "d", str(crafted), str(result_file)] + ([str(limit)] if limit is not None else [])
+            result = run(command, check=False)
+            if (result.returncode == 0) != accepted:
+                failures += 1
+                print("FAIL %s: %s" % ("refused" if accepted else "accepted", name))
         print("zstd interoperability: %d checks, %d failures" % (total, failures))
         return 0 if failures == 0 else 1
     finally:

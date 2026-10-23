@@ -253,7 +253,7 @@ fn unpack(data: const u8[:], e: Entry, out: u8[>..]&) -> bool {
     let bytes = data[(e.offset as i64)..(e.offset + e.packed) as i64];
     if e.method == 0 { if e.packed != e.size { return false; } out.append(bytes); }
     else if e.method == 1 { if !gsbzip2::decompress(bytes, out, e.size as i64) { return false; } }
-    else if e.method == 2 { if !zstd::decompress(bytes, out) { return false; } }
+    else if e.method == 2 { if !zstd::decompress_max(bytes, out, e.size as i64) { return false; } }
     else { return false; }
     return out.len as u64 == e.size && (e.flags & 4) != 0 && garchive::crc32(out) == e.crc;
 }

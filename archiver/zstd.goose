@@ -442,7 +442,7 @@ fn seq_table(src: const u8[:], mode: i64, which: i64, t: Fse&, has: bool, defaul
 }
 
 // Sequences section and execution (RFC 8878 3.1.1.3.2 and 3.1.1.4).
-fn sequences(blk: const u8[:], lits: const u8[:], out: u8[>..]&, frame_start: i64, ctx: Ctx&) -> bool {
+fn sequences(blk: const u8[:], lits: const u8[:], out: u8[>..]&, frame_start: i64, ctx: Ctx&, cap_end: i64) -> bool {
     if blk.len < 1 { return false; }
     var p: i64 = 0;
     var nbseq: i64 = 0;
@@ -463,6 +463,7 @@ fn sequences(blk: const u8[:], lits: const u8[:], out: u8[>..]&, frame_start: i6
     }
     if nbseq == 0 {
         if p != blk.len { return false; }
+        if out.len + lits.len > cap_end { return false; }
         out.append(lits[0..lits.len]);
         return true;
     }
@@ -556,6 +557,8 @@ fn sequences(blk: const u8[:], lits: const u8[:], out: u8[>..]&, frame_start: i6
         if r.pos < 0 { return false; }
         // Literals first, then the match from the window (RFC 8878 3.1.1.3.2.2).
         if lp + ll > lits.len { return false; }
+        // A block never decodes to more than 128 KiB, and never past the caller's limit.
+        if out.len + ll > cap_end { return false; }
         if ll > 0 { out.append(lits[lp..lp + ll]); }
         lp += ll;
         let ll0: i64 = if ll == 0 { 1 } else { 0 };
@@ -579,6 +582,7 @@ fn sequences(blk: const u8[:], lits: const u8[:], out: u8[>..]&, frame_start: i6
         }
         let produced = out.len - frame_start;
         if offset <= 0 || offset > produced { return false; }
+        if out.len + ml > cap_end { return false; }
         // Source before the end of the output: one copy when it does not overlap what is
         // written, else the repeating pattern is extended by doubling chunks.
         let base = out.len - offset;
@@ -594,16 +598,17 @@ fn sequences(blk: const u8[:], lits: const u8[:], out: u8[>..]&, frame_start: i6
         }
     }
     if lp < lits.len {
+        if out.len + (lits.len - lp) > cap_end { return false; }
         out.append(lits[lp..lits.len]);
     }
     return true;
 }
 
-fn decode_block(blk: const u8[:], out: u8[>..]&, frame_start: i64, ctx: Ctx&) -> bool {
+fn decode_block(blk: const u8[:], out: u8[>..]&, frame_start: i64, ctx: Ctx&, cap_end: i64) -> bool {
     var lits: u8[>..] = [];
     let used = lit_section(blk, lits, ctx);
     if used < 0 { return false; }
-    return sequences(blk[used..blk.len], lits[0..lits.len], out, frame_start, ctx);
+    return sequences(blk[used..blk.len], lits[0..lits.len], out, frame_start, ctx, cap_end);
 }
 
 // XXH64 with seed 0 (RFC: xxHash specification). Used for the frame content checksum.
@@ -682,6 +687,13 @@ fn xxh64(d: const u8[:]) -> u64 {
 
 // Decodes a sequence of zstd frames and skippable frames; appends the content to out.
 fn decompress(data: const u8[:], out: u8[>..]&) -> bool {
+    return decompress_max(data, out, 4611686018427387904);
+}
+// Decodes every frame of data and appends the bytes to out. The output may grow by at most
+// `limit` bytes; more is refused, so a small input cannot demand an unbounded buffer.
+fn decompress_max(data: const u8[:], out: u8[>..]&, limit: i64) -> bool {
+    if limit < 0 { return false; }
+    let limit_end = if limit > 4611686018427387904 - out.len { 4611686018427387904 } else { out.len + limit };
     var pos: i64 = 0;
     while pos < data.len {
         if pos + 8 > data.len { return false; }
@@ -711,8 +723,17 @@ fn decompress(data: const u8[:], out: u8[>..]&) -> bool {
             pos += did_bytes;
         }
         let fcs_bytes: i64 = if fcs_flag == 0 { if single == 1 { 1 } else { 0 } } else if fcs_flag == 1 { 2 } else if fcs_flag == 2 { 4 } else { 8 };
+        if pos + fcs_bytes > data.len { return false; }
+        // Frame_Content_Size, when present, is the exact size of the decoded frame.
+        var fcs: i64 = -1;
+        if fcs_bytes > 0 {
+            var v: i64 = 0;
+            for k in fcs_bytes { v = v | ((data[pos + k] as i64) << (8 * k)); }
+            if fcs_flag == 1 { v += 256; }
+            if v < 0 || v > limit_end - out.len { return false; }
+            fcs = v;
+        }
         pos += fcs_bytes;
-        if pos > data.len { return false; }
 
         let frame_start = out.len;
         var ctx = new_ctx();
@@ -724,23 +745,28 @@ fn decompress(data: const u8[:], out: u8[>..]&) -> bool {
             last = (h & 1) == 1;
             let btype = (h >> 1) & 3;
             let bsize = h >> 3;
+            // Block_Maximum_Size: no block is larger than 128 KiB.
+            if bsize > 131072 { return false; }
             if btype == 0 {
                 if pos + bsize > data.len { return false; }
+                if out.len + bsize > limit_end { return false; }
                 out.append(data[pos..pos + bsize]);
                 pos += bsize;
             } else if btype == 1 {
                 if pos + 1 > data.len { return false; }
-                let b = data[pos];
-                for k in bsize { out.push(b); }
+                if out.len + bsize > limit_end { return false; }
+                out.resize(out.len + bsize, data[pos]);
                 pos += 1;
             } else if btype == 2 {
                 if pos + bsize > data.len { return false; }
-                if !decode_block(data[pos..pos + bsize], out, frame_start, ctx) { return false; }
+                let cap_end = min(out.len + 131072, limit_end);
+                if !decode_block(data[pos..pos + bsize], out, frame_start, ctx, cap_end) { return false; }
                 pos += bsize;
             } else {
                 return false;
             }
         }
+        if fcs >= 0 && out.len - frame_start != fcs { return false; }
         if has_checksum {
             if pos + 4 > data.len { return false; }
             let want = le32(data, pos);
@@ -751,6 +777,7 @@ fn decompress(data: const u8[:], out: u8[>..]&) -> bool {
     }
     return true;
 }
+
 
 // ---------------------------------------------------------------------------------------
 // Encoder. Writes standard zstd frames: single-segment header with the 8-byte content size,
