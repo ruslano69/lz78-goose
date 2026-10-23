@@ -501,13 +501,57 @@ fn sequences(blk: const u8[:], lits: const u8[:], out: u8[>..]&, frame_start: i6
         let mlc = ctx.ml.sym[st_ml] as i64;
         let llc = ctx.ll.sym[st_ll] as i64;
         if ofc > 31 || mlc > 52 || llc > 35 { return false; }
-        let off_val = (1 << ofc) + bwd_read(stream, r, ofc);
-        let ml = ML_BASE[mlc] + bwd_read(stream, r, ML_BITS[mlc]);
-        let ll = LL_BASE[llc] + bwd_read(stream, r, LL_BITS[llc]);
-        if i + 1 < nbseq {
-            st_ll = (ctx.ll.base[st_ll] as i64) + bwd_read(stream, r, ctx.ll.nb[st_ll] as i64);
-            st_ml = (ctx.ml.base[st_ml] as i64) + bwd_read(stream, r, ctx.ml.nb[st_ml] as i64);
-            st_of = (ctx.of.base[st_of] as i64) + bwd_read(stream, r, ctx.of.nb[st_of] as i64);
+        // The six reads of a sequence come from two windows of eight bytes: the offset and
+        // match extra bits (at most 47), then the literal extra bits and the three state
+        // updates (at most 43). The first value read is the highest field of its window.
+        let mlb = ML_BITS[mlc];
+        let llb = LL_BITS[llc];
+        var of_x: i64 = 0;
+        var ml_x: i64 = 0;
+        let loa = r.pos - (ofc + mlb);
+        if loa >= 0 && (loa >> 3) + 8 <= stream.len {
+            let w = (read64(stream, loa >> 3) >> ((loa & 7) as u64)) as i64;
+            of_x = (w >> mlb) & ((1 << ofc) - 1);
+            ml_x = w & ((1 << mlb) - 1);
+            r.pos = loa;
+        } else {
+            of_x = bwd_read(stream, r, ofc);
+            ml_x = bwd_read(stream, r, mlb);
+        }
+        let more = i + 1 < nbseq;
+        var nbl: i64 = 0;
+        var nbm: i64 = 0;
+        var nbo: i64 = 0;
+        if more {
+            nbl = ctx.ll.nb[st_ll] as i64;
+            nbm = ctx.ml.nb[st_ml] as i64;
+            nbo = ctx.of.nb[st_of] as i64;
+        }
+        var ll_x: i64 = 0;
+        var s_ll: i64 = 0;
+        var s_ml: i64 = 0;
+        var s_of: i64 = 0;
+        let lob = r.pos - (llb + nbl + nbm + nbo);
+        if lob >= 0 && (lob >> 3) + 8 <= stream.len {
+            let w = (read64(stream, lob >> 3) >> ((lob & 7) as u64)) as i64;
+            ll_x = (w >> (nbl + nbm + nbo)) & ((1 << llb) - 1);
+            s_ll = (w >> (nbm + nbo)) & ((1 << nbl) - 1);
+            s_ml = (w >> nbo) & ((1 << nbm) - 1);
+            s_of = w & ((1 << nbo) - 1);
+            r.pos = lob;
+        } else {
+            ll_x = bwd_read(stream, r, llb);
+            s_ll = bwd_read(stream, r, nbl);
+            s_ml = bwd_read(stream, r, nbm);
+            s_of = bwd_read(stream, r, nbo);
+        }
+        let off_val = (1 << ofc) + of_x;
+        let ml = ML_BASE[mlc] + ml_x;
+        let ll = LL_BASE[llc] + ll_x;
+        if more {
+            st_ll = (ctx.ll.base[st_ll] as i64) + s_ll;
+            st_ml = (ctx.ml.base[st_ml] as i64) + s_ml;
+            st_of = (ctx.of.base[st_of] as i64) + s_of;
         }
         if r.pos < 0 { return false; }
         // Literals first, then the match from the window (RFC 8878 3.1.1.3.2.2).
@@ -1289,8 +1333,20 @@ fn choose_seq_table(codes: i64[:], n: i64, nsym: i64, dnorm: i64[:], dacc: i64, 
         if counts[s] > 0 { present += 1; only = s; }
     }
     if present == 1 {
-        norm[only] = 1 << acc;
-    } else if !fse_normalize(counts, nsym, acc, norm) {
+        // One symbol throughout. libzstd writes this as RLE: the symbol in one byte and no
+        // bits per sequence. A table that lists a single symbol is accepted by libzstd but
+        // refused by other decoders, so it is never written; with two sequences or fewer the
+        // predefined table is cheaper than the byte.
+        if n > 2 {
+            norm[only] = 1;
+            fse_ct_build(norm, nsym, 0, ct);
+            hdr.push(only as u8);
+            return 1;
+        }
+        fse_ct_build(dnorm, nsym, dacc, ct);
+        return 0;
+    }
+    if !fse_normalize(counts, nsym, acc, norm) {
         fse_ct_build(dnorm, nsym, dacc, ct);
         return 0;
     }
