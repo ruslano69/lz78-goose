@@ -709,7 +709,6 @@ fn decompress(data: const u8[:], out: u8[>..]&) -> bool {
 let BLOCK_MAX: i64 = 131072;
 let MIN_MATCH_ZSTD: i64 = 3;
 let HASH_BITS_ZSTD: i64 = 16;
-let CHAIN_DEPTH: i64 = 4;
 let NICE_LEN_ZSTD: i64 = 128;
 
 struct FseCt { tl: i64, tbl: u16[512], dnb: i64[64], dfind: i64[64] }
@@ -900,6 +899,12 @@ fn hash4_zstd(data: const u8[:], p: i64) -> i64 {
     let v: u32 = (data[p] as u32) | ((data[p + 1] as u32) << 8) | ((data[p + 2] as u32) << 16) | ((data[p + 3] as u32) << 24);
     return ((v * 2654435761) >> (32 - HASH_BITS_ZSTD)) as i64;
 }
+fn hash8_zstd(data: const u8[:], p: i64) -> i64 {
+    var v: u64 = 0;
+    for k in 8 { v = v | ((data[p + k] as u64) << ((8 * k) as u64)); }
+    return ((v * 11400714819323198485) >> 47) as i64;
+}
+
 // Length-limited Huffman code lengths (Kraft-exact repair, as zlib-style builders).
 fn huf_lengths(freq: i64[:], maxbits: i64, lengths: i64[:]) -> bool {
     var order: i64[288] = [0; 288];
@@ -1339,7 +1344,7 @@ fn match_at(data: const u8[:], a: i64, p: i64, limit: i64) -> i64 {
 
 // Encodes data[start..end) as one block. r holds the repeat offsets at the block start and
 // is updated only when the block is written compressed; a raw block leaves it unchanged.
-fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], prev: i32[:], r: i64[:], out: u8[>..]&) {
+fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: i32[:], r: i64[:], out: u8[>..]&) {
     var seqs: Seq[>..] = [];
     var lits: u8[>..] = [];
     var lit_start = start;
@@ -1359,7 +1364,8 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], prev: i
             roff[1] = rr[1];
             roff[2] = rr[2];
         }
-        for k in 3 {
+        // Only the offset of the last literal run is tried, as libzstd's double-fast does (rep1).
+        for k in 1 {
             let o = roff[k];
             if o <= 0 || p - o < 0 { continue; }
             // A candidate can only win if it matches at best_len (for ties the repeat code wins).
@@ -1371,29 +1377,31 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], prev: i
                 best_ov = k + 1;
             }
         }
-        if p + 4 <= data.len {
-            let h = hash4_zstd(data, p);
-            var cand = head[h] as i64;
-            var chain = CHAIN_DEPTH;
-            while cand >= 0 && chain > 0 {
-                chain -= 1;
-                // Only a candidate matching at best_len can be longer than the best so far.
-                if best_len > 0 && (best_len >= limit || data[cand + best_len] != data[p + best_len]) {
-                    cand = prev[cand] as i64;
-                    continue;
-                }
-                let l = match_at(data, cand, p, limit);
-                if l > best_len {
+        if p + 8 <= data.len {
+            // Two tables, no chains: the long table hashes 8 bytes, the short one 4.
+            let hl = hash8_zstd(data, p);
+            let hs = hash4_zstd(data, p);
+            let cl = longt[hl] as i64;
+            let cs = head[hs] as i64;
+            longt[hl] = p as i32;
+            head[hs] = p as i32;
+            if cl >= 0 && cl < p {
+                let l = match_at(data, cl, p, limit);
+                if l >= MIN_MATCH_ZSTD && l > best_len {
                     best_len = l;
-                    best_pos = cand;
-                    best_ov = (p - cand) + 3;
-                    // A long enough match ends the search, as libzstd's target length does.
-                    if best_len >= NICE_LEN_ZSTD { break; }
+                    best_pos = cl;
+                    best_ov = (p - cl) + 3;
                 }
-                cand = prev[cand] as i64;
             }
-            prev[p] = head[h];
-            head[h] = p as i32;
+            // The short table is consulted only when neither the long table nor a repeat matched.
+            if best_len == 0 && cs >= 0 && cs < p && cs != cl {
+                let l = match_at(data, cs, p, limit);
+                if l >= MIN_MATCH_ZSTD && l > best_len {
+                    best_len = l;
+                    best_pos = cs;
+                    best_ov = (p - cs) + 3;
+                }
+            }
         }
         if best_len >= MIN_MATCH_ZSTD {
             misses = 0;
@@ -1403,10 +1411,9 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], prev: i
             // Fast search: only the last two positions of a match enter the hash chains.
             var k = p + best_len - 2;
             if k < p + 1 { k = p + 1; }
-            while k < p + best_len && k + 4 <= data.len {
-                let h2 = hash4_zstd(data, k);
-                prev[k] = head[h2];
-                head[h2] = k as i32;
+            while k < p + best_len && k + 8 <= data.len {
+                longt[hash8_zstd(data, k)] = k as i32;
+                head[hash4_zstd(data, k)] = k as i32;
                 k += 1;
             }
             p += best_len;
@@ -1484,8 +1491,8 @@ fn compress(data: const u8[:], out: u8[>..]&) -> bool {
     out.push(0xE4);
     put_le(out, data.len as i64, 8);
     var head: i32[65536] = [-1; 65536];
-    var prev: i32[>..] = [];
-    for i in data.len { prev.push(-1); }
+    var longt: i32[>..] = [];
+    longt.resize(131072, -1);
     var reps: i64[3] = [1, 4, 8];
     var start: i64 = 0;
     if data.len == 0 {
@@ -1495,7 +1502,7 @@ fn compress(data: const u8[:], out: u8[>..]&) -> bool {
         let end = min(data.len, start + BLOCK_MAX);
         let last = end == data.len;
         var blkbuf: u8[>..] = [];
-        compress_block(data, start, end, head[0..65536], prev[0..prev.len], reps[0..3], blkbuf);
+        compress_block(data, start, end, head[0..65536], longt[0..longt.len], reps[0..3], blkbuf);
         // The first byte of the block header carries the last-block flag.
         if last {
             blkbuf[0] = blkbuf[0] | 1;
