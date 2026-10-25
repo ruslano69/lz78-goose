@@ -19,6 +19,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 
 ARCHIVER = pathlib.Path(__file__).resolve().parent
 
@@ -31,6 +32,10 @@ def corpus():
         "small": b"hello hello hello world, repeated text. " * 4,
         "random": bytes(rng.getrandbits(8) for _ in range(70000)),
         "zeros": bytes(300000),
+        "uniform_short": b"\xff" * 7,
+        "uniform_word_tail": b"\x80" * 135,
+        "uniform_crossblock": b"\xff" * 262145,
+        "rle_then_words": bytes(131072) + b"alpha beta gamma delta " * 8000 + b"\xff" * 131072,
         "words": b"".join(rng.choice([b"alpha", b"beta", b"gamma", b" ", b"\n"]) for _ in range(40000)),
     }
     text = b"".join((ARCHIVER / name).read_bytes() for name in ["zstd.goose", "sevenzip.goose", "gsbzip2.goose"])
@@ -87,7 +92,7 @@ def main():
     out = pathlib.Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     gzstd = out / "gzstd"
-    with_temp = pathlib.Path(subprocess.run(["mktemp", "-d"], capture_output=True, text=True, check=True).stdout.strip())
+    with_temp = pathlib.Path(tempfile.mkdtemp(prefix="zstd_"))
     try:
         for name in ["zstd.goose", "zstd_cli.goose"]:
             shutil.copy(ARCHIVER / name, with_temp / name)

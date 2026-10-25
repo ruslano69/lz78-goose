@@ -82,7 +82,7 @@ fn bwd_read(src: const u8[:], r: Bwd&, k: i64) -> i64 {
     var v: i64 = 0;
     if lo >= 0 && (lo >> 3) + 8 <= src.len {
         // Eight bytes from the byte holding the lowest bit; k <= 32 and the shift is below 8.
-        v = ((read64(src, lo >> 3) >> ((lo & 7) as u64)) as i64) & ((1 << k) - 1);
+        v = ((read64(src, lo >> 3) >> ((lo & 7) as u64)) as! i64) & ((1 << k) - 1);
     } else if lo >= 0 {
         let shift = lo & 7;
         var acc: i64 = 0;
@@ -511,7 +511,7 @@ fn sequences(blk: const u8[:], lits: const u8[:], out: u8[>..]&, frame_start: i6
         var ml_x: i64 = 0;
         let loa = r.pos - (ofc + mlb);
         if loa >= 0 && (loa >> 3) + 8 <= stream.len {
-            let w = (read64(stream, loa >> 3) >> ((loa & 7) as u64)) as i64;
+            let w = (read64(stream, loa >> 3) >> ((loa & 7) as u64)) as! i64;
             of_x = (w >> mlb) & ((1 << ofc) - 1);
             ml_x = w & ((1 << mlb) - 1);
             r.pos = loa;
@@ -534,7 +534,7 @@ fn sequences(blk: const u8[:], lits: const u8[:], out: u8[>..]&, frame_start: i6
         var s_of: i64 = 0;
         let lob = r.pos - (llb + nbl + nbm + nbo);
         if lob >= 0 && (lob >> 3) + 8 <= stream.len {
-            let w = (read64(stream, lob >> 3) >> ((lob & 7) as u64)) as i64;
+            let w = (read64(stream, lob >> 3) >> ((lob & 7) as u64)) as! i64;
             ll_x = (w >> (nbl + nbm + nbo)) & ((1 << llb) - 1);
             s_ll = (w >> (nbm + nbo)) & ((1 << nbl) - 1);
             s_ml = (w >> nbo) & ((1 << nbm) - 1);
@@ -899,14 +899,16 @@ fn ml_code(v: i64) -> i64 {
 }
 
 // Sequences of one block as a backward bitstream, in the order the decoder reads them.
-fn encode_sequences(seqs: Seq[:], ll_ct: FseCt&, of_ct: FseCt&, ml_ct: FseCt&, out: u8[>..]&) {
+fn encode_sequences(seqs: Seq[:], ll_codes: i64[:], ml_codes: i64[:], of_codes: i64[:], ll_ct: FseCt&, of_ct: FseCt&, ml_ct: FseCt&, out: u8[>..]&) {
+    // Reuse the codes already computed for choosing the FSE tables.
     let n = seqs.len;
+    assert(ll_codes.len == n && ml_codes.len == n && of_codes.len == n);
     var bw = BitW { 0, 0 };
     let last = seqs[n - 1];
-    let llc = ll_code(last.ll);
-    let mlc = ml_code(last.ml);
+    let llc = ll_codes[n - 1];
+    let mlc = ml_codes[n - 1];
     let ofv = last.ov;
-    let ofc = highbit(ofv);
+    let ofc = of_codes[n - 1];
     var st_ll = fse_init(ll_ct, llc);
     var st_of = fse_init(of_ct, ofc);
     var st_ml = fse_init(ml_ct, mlc);
@@ -916,10 +918,10 @@ fn encode_sequences(seqs: Seq[:], ll_ct: FseCt&, of_ct: FseCt&, ml_ct: FseCt&, o
     var i = n - 2;
     while i >= 0 {
         let s = seqs[i];
-        let llc2 = ll_code(s.ll);
-        let mlc2 = ml_code(s.ml);
+        let llc2 = ll_codes[i];
+        let mlc2 = ml_codes[i];
         let ofv2 = s.ov;
-        let ofc2 = highbit(ofv2);
+        let ofc2 = of_codes[i];
         st_of = fse_put(out, bw, of_ct, st_of, ofc2);
         st_ml = fse_put(out, bw, ml_ct, st_ml, mlc2);
         st_ll = fse_put(out, bw, ll_ct, st_ll, llc2);
@@ -1134,6 +1136,11 @@ fn put_compressed_literals(lits: const u8[:], out: u8[>..]&) -> bool {
     if distinct < 2 || maxsym == 0 { return false; }
     var lens: i64[256] = [0; 256];
     if !huf_lengths(freq, 11, lens) { return false; }
+    // Even without tree/stream headers these codes cannot beat raw bytes.
+    // Avoid encoding and copying a Huffman candidate that will be discarded.
+    var bits: i64 = 0;
+    for s in 256 { bits += freq[s] * lens[s]; }
+    if bits >= n * 8 { return false; }
     var tl: i64 = 0;
     for s in maxsym + 1 {
         if lens[s] > tl { tl = lens[s]; }
@@ -1416,20 +1423,57 @@ fn rep_update(ov: i64, ll: i64, r: i64[:]) -> i64 {
 
 // Length of the common prefix of data[a..] and data[p..], at most limit bytes.
 fn match_at(data: const u8[:], a: i64, p: i64, limit: i64) -> i64 {
+    // Most hash candidates differ at the first byte: reject them before
+    // constructing word-comparison views.
+    if limit == 0 || data[a] != data[p] { return 0; }
+    // Validate the ranges once, then compare eight little-endian bytes at a
+    // time. XOR's first set bit identifies the first differing byte.
+    let left = data[a..a + limit];
+    let right = data[p..p + limit];
     var l: i64 = 0;
-    while l < limit && data[a + l] == data[p + l] { l += 1; }
+    while l + 8 <= limit {
+        let diff = read64(left, l) ^ read64(right, l);
+        if diff != 0 { return l + ctz(diff) / 8; }
+        l += 8;
+    }
+    while l < limit && left[l] == right[l] { l += 1; }
     return l;
 }
 
 // Encodes data[start..end) as one block. r holds the repeat offsets at the block start and
 // is updated only when the block is written compressed; a raw block leaves it unchanged.
 fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: i32[:], base: i64, hshift: i64, lshift: i64, r: i64[:], out: u8[>..]&) {
+    // A uniform block needs one byte, no match tables or entropy coding.
+    // Reject ordinary input after inspecting only the first word.
+    let raw_size = end - start;
+    if raw_size > 0 {
+        let byte = data[start];
+        let word = (byte as u64) * 72340172838076673;
+        var same = true;
+        var at = start;
+        while at + 8 <= end {
+            if read64(data, at) != word { same = false; break; }
+            at += 8;
+        }
+        if same {
+            while at < end {
+                if data[at] != byte { same = false; break; }
+                at += 1;
+            }
+        }
+        if same {
+            // Block_Type = 1; Block_Size is the regenerated byte count.
+            // RLE blocks preserve the repeat-offset history.
+            put_le(out, 2 | (raw_size << 3), 3);
+            out.push(byte);
+            return;
+        }
+    }
     var seqs: Seq[>..] = [];
     var lits: u8[>..] = [];
     var lit_start = start;
     var p = start;
     var rr: i64[3] = [r[0], r[1], r[2]];
-    var misses: i64 = 0;
     while p < end {
         var best_len: i64 = 0;
         var best_pos: i64 = -1;
@@ -1458,8 +1502,11 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: 
         }
         if p + 8 <= data.len {
             // Two tables, no chains: the long table hashes 8 bytes, the short one 4.
-            let hl = (hash8_zstd(data, p) >> lshift);
-            let hs = (hash4_zstd(data, p) >> hshift);
+            // Both hashes use the same input word. Keep its low 32 bits
+            // for the short hash instead of loading the first bytes again.
+            let word = read64(data, p);
+            let hl = (((word * 11400714819323198485) >> 47) as i64) >> lshift;
+            let hs = ((((word as! u32) * 2654435761) >> (32 - HASH_BITS_ZSTD)) as i64) >> hshift;
             let cl = longt[hl] as i64 - base;
             let cs = head[hs] as i64 - base;
             longt[hl] = (p + base) as i32;
@@ -1483,7 +1530,6 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: 
             }
         }
         if best_len >= MIN_MATCH_ZSTD {
-            misses = 0;
             seqs.push(Seq { ll, best_len, best_ov });
             rep_update(best_ov, ll, rr);
             lits.append(data[lit_start..p]);
@@ -1491,20 +1537,33 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: 
             // The last two positions of the match, each if its 8 bytes are in the block.
             let e1 = p + best_len - 2;
             if e1 + 8 <= data.len {
-                longt[(hash8_zstd(data, e1) >> lshift)] = (e1 + base) as i32;
-                head[(hash4_zstd(data, e1) >> hshift)] = (e1 + base) as i32;
+                let word1 = read64(data, e1);
+                let hl1 = (((word1 * 11400714819323198485) >> 47) as i64) >> lshift;
+                let hs1 = ((((word1 as! u32) * 2654435761) >> (32 - HASH_BITS_ZSTD)) as i64) >> hshift;
+                longt[hl1] = (e1 + base) as i32;
+                head[hs1] = (e1 + base) as i32;
             }
             if e1 + 9 <= data.len {
-                longt[(hash8_zstd(data, e1 + 1) >> lshift)] = (e1 + 1 + base) as i32;
-                head[(hash4_zstd(data, e1 + 1) >> hshift)] = (e1 + 1 + base) as i32;
+                let word2 = read64(data, e1 + 1);
+                let hl2 = (((word2 * 11400714819323198485) >> 47) as i64) >> lshift;
+                let hs2 = ((((word2 as! u32) * 2654435761) >> (32 - HASH_BITS_ZSTD)) as i64) >> hshift;
+                longt[hl2] = (e1 + 1 + base) as i32;
+                head[hs2] = (e1 + 1 + base) as i32;
             }
             p += best_len;
             lit_start = p;
         } else {
-            // Search step grows with the miss run, as libzstd's fast strategy does.
-            misses += 1;
-            p += 1 + (misses >> 7);
+            // Grow the skip by bytes since the last match, not by failed
+            // probes. This is the double-fast byte-distance search strength.
+            p += 1 + ((p - lit_start) >> 7);
         }
+    }
+    // With no sequence this encoder always writes a raw block. Do not build
+    // literal buffers or run Huffman on data that will be discarded.
+    if seqs.len == 0 {
+        put_le(out, (end - start) << 3, 3);
+        out.append(data[start..end]);
+        return;
     }
     lits.append(data[lit_start..end]);
     // Block body: literals, sequence count, modes (all predefined), bitstream.
@@ -1542,12 +1601,14 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: 
         var of_ct = fse_ct_new();
         var ml_ct = fse_ct_new();
         var tables: u8[>..] = [];
-        let m_ll = choose_seq_table(llc[0..n], n, 36, LL_DEFAULT, 6, 6, ll_ct, tables);
-        let m_of = choose_seq_table(ofc[0..n], n, 29, OF_DEFAULT, 5, 5, of_ct, tables);
-        let m_ml = choose_seq_table(mlc[0..n], n, 53, ML_DEFAULT, 6, 6, ml_ct, tables);
+        // Normalize new tables over 256 states for finer frequency precision;
+        // predefined tables retain their format-defined logs.
+        let m_ll = choose_seq_table(llc[0..n], n, 36, LL_DEFAULT, 6, 8, ll_ct, tables);
+        let m_of = choose_seq_table(ofc[0..n], n, 29, OF_DEFAULT, 5, 8, of_ct, tables);
+        let m_ml = choose_seq_table(mlc[0..n], n, 53, ML_DEFAULT, 6, 8, ml_ct, tables);
         body.push(((m_ll << 6) | (m_of << 4) | (m_ml << 2)) as u8);
         body.append(tables[0..tables.len]);
-        encode_sequences(seqs[0..n], ll_ct, of_ct, ml_ct, body);
+        encode_sequences(seqs[0..n], llc[0..n], mlc[0..n], ofc[0..n], ll_ct, of_ct, ml_ct, body);
     }
     let raw = end - start;
     if n == 0 || body.len >= raw {
@@ -1591,13 +1652,12 @@ fn encode_frame(data: const u8[:], out: u8[>..]&, head: i32[:], longt: i32[:], b
     while start < data.len {
         let end = min(data.len, start + BLOCK_MAX);
         let last = end == data.len;
-        var blkbuf: u8[>..] = [];
-        compress_block(data, start, end, head, longt, base, hshift, lshift, reps[0..3], blkbuf);
+        // Append directly to the frame; a temporary block would copy every
+        // raw or compressed byte once more before reaching this destination.
+        let block_at = out.len;
+        compress_block(data, start, end, head, longt, base, hshift, lshift, reps[0..3], out);
         // The first byte of the block header carries the last-block flag.
-        if last {
-            blkbuf[0] = blkbuf[0] | 1;
-        }
-        out.append(blkbuf[0..blkbuf.len]);
+        if last { out[block_at] = out[block_at] | 1; }
         start = end;
     }
     let sum = xxh64(data[0..data.len]) & 4294967295;
