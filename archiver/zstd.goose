@@ -1521,68 +1521,78 @@ fn rle_block(data: const u8[:], start: i64, end: i64, out: u8[>..]&) -> bool {
     return false;
 }
 
-// Records position q in both double-fast tables (an entry is position + base).
-fn dfast_put(data: const u8[:], head: u32[:], longt: u32[:], base: i64, hshift: i64, lshift: i64, q: i64) {
+inline fn dfast_match(data: const u8[:], a: i64, p: i64, word: u64, limit: i64) -> i64 {
+    // The fast parser leaves at least 16 bytes at p (15 for its one-byte lookahead).
+    let diff = read64(data, a) ^ word;
+    if diff != 0 { return ctz(diff) / 8; }
+    return 8 + match_at(data, a + 8, p + 8, limit - 8);
+}
+
+// u32 entries hold position + base; u64 entries also cache the first four input bytes in the high half.
+fn dfast_put<T>(data: const u8[:], head: T[:], longt: T[:], base: i64, hshift: i64, lshift: i64, q: i64) {
     if q + 8 > data.len { return; }
     let w = read64(data, q);
     let hl = (((w * 11400714819323198485) >> 47) as i64) >> lshift;
-    let hs = ((((w as! u32) * 2654435761) >> (32 - HASH_BITS_ZSTD)) as i64) >> hshift;
-    let entry = (q + base) as! u32;
+    let hs = ((((w << 24) * 889523592379) >> (64 - HASH_BITS_ZSTD)) as i64) >> hshift;
+    let entry = (((q + base) as u64) | ((w & 4294967295) << 32)) as! T;
     longt[hl] = entry;
     head[hs] = entry;
 }
 
-// Parses data[start..end) the way libzstd's double-fast search does: a repeat offset one byte ahead, a long
-// (8-byte hash) candidate, else a short (4-byte hash) candidate that a long one at the next byte may
+// Double-fast search: a repeat offset one byte ahead, a long (8-byte hash) candidate, else a short
+// (5-byte hash) candidate that a long one at the next byte may
 // replace; matches grow backwards over pending literals, and the second repeat offset is tried at once
 // after every match. Returns the start of the trailing literals.
-fn parse_dfast(data: const u8[:], start: i64, end: i64, head: u32[:], longt: u32[:], base: i64, hshift: i64, lshift: i64, rr: i64[:], seqs: Seq[>..]&, lits: u8[>..]&, collect: bool) -> i64 {
+fn parse_dfast<T>(data: const u8[:], start: i64, end: i64, head: T[:], longt: T[:], base: i64, hshift: i64, lshift: i64, rr: i64[:], seqs: Seq[>..]&, lits: u8[>..]&, collect: bool) -> i64 {
+    // The two supported table types fold this to false (u32 positions) or true (u64 cached prefixes).
+    let cached = ((~default<T>()) as u64) > 4294967295;
     var p = start;
     var anchor = start;
     while p + 16 <= end {
         let word = read64(data, p);
         let hl = (((word * 11400714819323198485) >> 47) as i64) >> lshift;
-        let hs = ((((word as! u32) * 2654435761) >> (32 - HASH_BITS_ZSTD)) as i64) >> hshift;
+        let hs = ((((word << 24) * 889523592379) >> (64 - HASH_BITS_ZSTD)) as i64) >> hshift;
         let le = longt[hl];
         let se = head[hs];
-        let entry = (p + base) as! u32;
+        let entry = (((p + base) as u64) | ((word & 4294967295) << 32)) as! T;
         longt[hl] = entry;
         head[hs] = entry;
         var s = p;
         var mpos: i64 = -1;
         var mlen: i64 = 0;
-        let w1 = read64(data, p + 1);
+        let w1_low = (word >> 8) & 4294967295;
         let o1 = rr[0];
-        if o1 > 0 && p + 1 - o1 >= 0 && ((read64(data, p + 1 - o1) ^ w1) & 4294967295) == 0 {
+        if o1 > 0 && p + 1 - o1 >= 0 && ((read64(data, p + 1 - o1) ^ w1_low) & 4294967295) == 0 {
             s = p + 1;
             mpos = s - o1;
-            mlen = 4 + match_at(data, mpos + 4, s + 4, min(131072, end - s) - 4);
+            mlen = dfast_match(data, mpos, s, read64(data, s), min(131072, end - s));
         } else {
-            let cl = le as i64 - base;
-            if cl >= 0 && cl < p && read64(data, cl) == word {
+            let cl = ((le as u64) & 4294967295) as i64 - base;
+            if cl >= 0 && cl < p && (!cached || ((le as u64) >> 32) == (word & 4294967295)) && read64(data, cl) == word {
                 mpos = cl;
                 mlen = 8 + match_at(data, cl + 8, p + 8, min(131072, end - p) - 8);
             } else {
-                let cs = se as i64 - base;
-                if cs >= 0 && cs < p && ((read64(data, cs) ^ word) & 4294967295) == 0 {
+                let cs = ((se as u64) & 4294967295) as i64 - base;
+                if cs >= 0 && cs < p && (if cached { ((se as u64) >> 32) == (word & 4294967295) } else { ((read64(data, cs) ^ word) & 4294967295) == 0 }) {
+                    let w1 = read64(data, p + 1);
                     let h3 = (((w1 * 11400714819323198485) >> 47) as i64) >> lshift;
                     let e3 = longt[h3];
-                    longt[h3] = (p + 1 + base) as! u32;
-                    let c3 = e3 as i64 - base;
-                    if c3 >= 0 && c3 <= p && read64(data, c3) == w1 {
+                    longt[h3] = (((p + 1 + base) as u64) | ((w1 & 4294967295) << 32)) as! T;
+                    let c3 = ((e3 as u64) & 4294967295) as i64 - base;
+                    if c3 >= 0 && c3 <= p && (!cached || ((e3 as u64) >> 32) == (w1 & 4294967295)) && read64(data, c3) == w1 {
                         s = p + 1;
                         mpos = c3;
                         mlen = 8 + match_at(data, c3 + 8, s + 8, min(131072, end - s) - 8);
                     } else {
                         mpos = cs;
-                        mlen = 4 + match_at(data, cs + 4, p + 4, min(131072, end - p) - 4);
+                        mlen = dfast_match(data, cs, p, word, min(131072, end - p));
                     }
                 }
             }
         }
         if mlen == 0 {
-            // The step grows with the bytes since the last match (libzstd's search strength of 8).
-            p += 1 + ((p - anchor) >> 8);
+            // Grow the step by byte distance, as klauspost's default search does.
+            p += 1 + ((p - anchor) >> 7);
             continue;
         }
         var pos = mpos;
@@ -1599,7 +1609,7 @@ fn parse_dfast(data: const u8[:], start: i64, end: i64, head: u32[:], longt: u32
         anchor = p;
         // A repeat of the second offset right after a match costs almost nothing.
         while p + 16 <= end && rr[1] > 0 && p - rr[1] >= 0 && ((read64(data, p) ^ read64(data, p - rr[1])) & 4294967295) == 0 {
-            let l = 4 + match_at(data, p - rr[1] + 4, p + 4, min(131072, end - p) - 4);
+            let l = dfast_match(data, p - rr[1], p, read64(data, p), min(131072, end - p));
             dfast_put(data, head, longt, base, hshift, lshift, p);
             seqs.push(Seq { 0, l as! u32, 1 });
             rep_update(1, 0, rr);
@@ -1612,7 +1622,7 @@ fn parse_dfast(data: const u8[:], start: i64, end: i64, head: u32[:], longt: u32
 
 // Encodes data[start..end) as one block. r holds the repeat offsets at the block start and
 // is updated only when the block is written compressed; a raw block leaves it unchanged.
-fn compress_block(data: const u8[:], start: i64, end: i64, head: u32[:], longt: u32[:], base: i64, hshift: i64, lshift: i64, r: i64[:], out: u8[>..]&) {
+fn compress_block<T>(data: const u8[:], start: i64, end: i64, head: T[:], longt: T[:], base: i64, hshift: i64, lshift: i64, r: i64[:], out: u8[>..]&) {
     if rle_block(data, start, end, out) { return; }
     var seqs: Seq[>..] = [];
     var lits: u8[>..] = [];
@@ -2308,7 +2318,7 @@ fn compress(data: const u8[:], out: u8[>..]&) -> bool {
     longt.resize(1 << lbits, 0);
     return encode_frame(data, out, head[0..head.len], longt[0..longt.len], 1, 16 - hbits, 17 - lbits);
 }
-fn encode_frame(data: const u8[:], out: u8[>..]&, head: u32[:], longt: u32[:], base: i64, hshift: i64, lshift: i64) -> bool {
+fn encode_frame<T>(data: const u8[:], out: u8[>..]&, head: T[:], longt: T[:], base: i64, hshift: i64, lshift: i64) -> bool {
     // Frame header: magic, Frame_Header_Descriptor (single segment, 8-byte content size,
     // content checksum), the content size.
     put_le(out, 4247762216, 4);
@@ -2351,9 +2361,9 @@ fn compress_with(ctx: EncCtx&, data: const u8[:], out: u8[>..]&) -> bool {
     return ok;
 }
 
-// Encoder state kept between calls: hash tables of positions (stored with an offset, see
-// compress_with) and the offset of the next call.
-struct EncCtx { head: u32[65536], longt: u32[131072], base: i64 }
+// Kept encoder state: low 32 bits are position + base, high 32 bits cache the input prefix.
+// compress_with advances the base so entries from earlier calls never match.
+struct EncCtx { head: u64[65536], longt: u64[131072], base: i64 }
 
 fn enc_new() -> EncCtx {
     return EncCtx { [0; 65536], [0; 131072], 1 };

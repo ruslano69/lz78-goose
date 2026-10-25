@@ -216,3 +216,74 @@ more again. Another effect distorted the first measurement: the same one-thread 
 in a program that imports a module with a `thread_fn` (176 against 158 MB/s on the source text, probably
 thread-local data stacks), so a one-thread baseline taken from a program that links the pipeline flatters
 it. That is why the benchmark is split in two programs. The module stays as an opt-in, used by nothing else.
+
+## EXE/DLL: cached prefixes and five-byte short hashes (2026-10-25)
+
+The retained change targets levels 1-3. Kept contexts store position + base in the low 32 bits of each
+u64 entry and the first four input bytes in the high 32 bits. A short candidate is checked without
+following its position back into the input; long candidates reject a mismatching cached prefix before
+reading the full eight bytes. The short hash now covers five bytes, and the skip grows by byte distance
+shifted by seven, as in klauspost's default. Repeat lookahead reuses bytes 1..4 of the current word;
+a matching word is extended by XOR/ctz before calling the general suffix matcher. All source is Goose.
+
+A sampling profile on the preceding Clang build attributed about 73% of leaf samples on both EXE and
+DLL to the parse (including work inlined into encode_frame), 21-22% to block/entropy writing, 3-4% to
+match_at and under 1% to xxh64. The largest hotspots were the dependent loads of table candidates and
+the input words they address. These are sample shares, not absolute function timings.
+
+**GCC 15.2.0 is the faster backend for this revision.** Windows x64, Go 1.25.7, the same pinned klauspost
+source as the earlier comparison (7cfdd8f), SpeedDefault, CRC enabled, one thread, reused contexts and
+output. Three warmups; medians of seven alternating batches of about 0.16 s. File IO and process startup
+are outside each timer. Before/after below both use GCC; do not confuse this with the earlier Clang
+comparison. The table includes four full PE files in addition to the original EXE/DLL prefixes.
+
+| Input | before MB/s | after MB/s | Go MB/s | after / Go | output vs Go |
+|---|---:|---:|---:|---:|---:|
+| EXE, 2 MB | 154.8 | 191.0 | 186.3 | +2.5% | -1.20% |
+| DLL, 3 MB | 139.6 | 176.4 | 168.7 | +4.5% | -0.90% |
+| Full Goose EXE, 4.26 MB | 155.9 | 196.1 | 192.4 | +1.9% | -1.19% |
+| Full Python DLL, 6.78 MB | 185.2 | 234.5 | 227.0 | +3.3% | -1.28% |
+| ntdll.dll, 2.03 MB | 156.3 | 194.5 | 189.6 | +2.6% | -1.20% |
+| KernelBase.dll, 3.11 MB | 194.8 | 237.4 | 223.7 | +6.1% | -0.93% |
+
+On these six files the same-backend gain is 22-27%, with a 2-6% lead over Go. Compressed size grows
+0.7-1.9% from the preceding Goose version, while remaining 0.9-1.3% smaller than Go. Changing the hash
+and skip changes the parse and compressed bytes; caching a prefix by itself does not.
+
+The broader GCC screen kept the previous word wins: small words 498.7 vs Go 423.5 MB/s, 256 words 325.3
+vs 280.4 MB/s. Mixed input reaches 210.7 vs 200.8 MB/s; random input is still behind, 3460 vs 6602 MB/s.
+Zeros are effectively tied at 8.0 GB/s. The word cases improve about 3% from the preceding GCC build.
+
+Fresh calls retain compact u32 tables, through the same generic parser, to avoid zeroing an extra
+768 KiB on every call. Measured fresh-call GCC gains are 19% on EXE and 20% on DLL; 256 words gain 4%.
+The fresh random case regresses 6%. With Clang the retained version improves kept EXE/DLL throughput
+about 12-14%, but remains behind Go and its fresh random/word cases regress about 11%/9%. Compiler and
+API mode are part of these results; this is not a universal speedup.
+
+Logical full-size table storage: 768 KiB for fresh calls, 1536 KiB for EncCtx (formerly 768 KiB).
+Separately, three whole-process runs on the 3 MB DLL, 40 encodes with a kept context, measured median
+peak working set 10.61 -> 13.00 MiB and sampled peak private commit 17.16 -> 19.16 MiB.
+Those process figures include input/output, runtime and scratch; they are not the table sizes.
+
+Validation: 171 level/corpus cases in each of Release and Debug; 80 klauspost and 95 libzstd checks in
+each mode; 51 fresh/reused-context comparisons, including changed sizes/prefixes, block boundaries and
+an epoch reset; the existing 138336 prefix and 4352 short RLE checks; native 7z tests in both modes.
+The native codec tests also pass as MSVC executables in Release and Debug. All 13 benchmark corpora
+produce identical bytes with fresh and kept tables, and their kept frames decode with Go and libzstd.
+The opt-in pipeline still passes 18 sequential interoperability cases; its known concurrent-call
+queue issue is outside this change.
+
+Reproduce the kept-context build:
+
+```powershell
+goose build archiver/bench_zstd.goose --cc C:/msys64/ucrt64/bin/gcc.exe -o build/archiver/bench_zstd.exe
+./build/archiver/bench_zstd.exe reuse INPUT.bin 100 build/archiver/output.zst
+```
+
+Raw samples, input/executable/source hashes and rejected probes remain under ignored
+`build/zstd-bench/`: `exe-dll-retained-gcc-full-results.json`,
+`exe-dll-retained-gcc-oneshot-results.json`, `exe-dll-retained-results.json` (Clang),
+`exe-dll-retained-oneshot-results.json`, `exe-dll-memory-results.json`, and
+`exe-dll-profile-before.json` / `exe-dll-profile-ip.json`. Small first-byte prechecks, packed six-bit
+tags, four-byte flush batching and redundant match-limit removal did not improve this workload
+and were discarded.
