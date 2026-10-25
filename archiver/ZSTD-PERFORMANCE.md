@@ -194,21 +194,25 @@ module makes `goose run` (the in-process backend) refuse the program.
 
 Output is byte-identical to `compress_level` on the corpus (including a file with raw blocks interleaved);
 with raw blocks forced on every third block, single-thread and pipelined outputs both decode with libzstd
-and differ by a few bytes. Clang build, level 3, wall-clock MB/s, medians of 7 alternating runs, spawn
-and input copy included. libzstd 1.5.7 through Python, one thread (`nbWorkers` 0):
+and differ by a few bytes.
+
+Result: it does not pay. Clang build, level 3, wall-clock MB/s, medians of 9 alternating runs, spawn and
+input copy included, machine otherwise idle; libzstd 1.5.7 through Python, one thread (`nbWorkers` 0).
+The one-thread column comes from `bench_zstd`, the two-thread column from `bench_zstd_pipe`:
 
 | Input | ours 1 thread | ours 2 threads | libzstd 1 thread |
 |---|---:|---:|---:|
-| source text 1.3 MB | 156 | 143 | 206 |
-| executable 2 MB | 153 | 151 | 193 |
-| words 1 MB | 279 | 262 | 319 |
-| Python sources 4 MB | 200 | 203 | 263 |
-| DLL 3 MB | 136 | 144 | 173 |
-| mixed 14 MB | 161 | 170 | 208 |
+| source text 1.3 MB | 174 | 146 | 211 |
+| executable 2 MB | 166 | 152 | 196 |
+| words 1 MB | 330 | 277 | 333 |
+| Python sources 4 MB | 234 | 211 | 281 |
+| DLL 3 MB | 150 | 148 | 179 |
+| mixed 14 MB | 176 | 176 | 214 |
 
-The pipeline pays only past a few MB and then by 2-6%, far under the parse-only ceiling (217 MB/s on the
-mixed input): a worker that only drains the messages already leaves the parsing thread at 193 MB/s
+Two threads are 0.84-1.00 times the one-thread speed. A parse-only run reaches 217 MB/s on the mixed
+input; a worker that only drains the messages already leaves the parsing thread at about 193 MB/s
 (building the message, copying 14 MB of input and about 18 MB of sequences), and the working worker costs
-another 12% (memory traffic; both threads read their own copy of the input). Against libzstd's own
-multi-thread mode this would not be a fair comparison either way; none was made. The module is kept
-as an opt-in, not used by any other code.
+more again. Another effect distorted the first measurement: the same one-thread code runs about 10% slower
+in a program that imports a module with a `thread_fn` (176 against 158 MB/s on the source text, probably
+thread-local data stacks), so a one-thread baseline taken from a program that links the pipeline flatters
+it. That is why the benchmark is split in two programs. The module stays as an opt-in, used by nothing else.
