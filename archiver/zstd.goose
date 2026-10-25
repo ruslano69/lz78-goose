@@ -1471,128 +1471,103 @@ fn rle_block(data: const u8[:], start: i64, end: i64, out: u8[>..]&) -> bool {
     return false;
 }
 
+// Records position q in both double-fast tables (an entry is position + base).
+fn dfast_put(data: const u8[:], head: u32[:], longt: u32[:], base: i64, hshift: i64, lshift: i64, q: i64) {
+    if q + 8 > data.len { return; }
+    let w = read64(data, q);
+    let hl = (((w * 11400714819323198485) >> 47) as i64) >> lshift;
+    let hs = ((((w as! u32) * 2654435761) >> (32 - HASH_BITS_ZSTD)) as i64) >> hshift;
+    let entry = (q + base) as! u32;
+    longt[hl] = entry;
+    head[hs] = entry;
+}
+
+// Parses data[start..end) the way libzstd's double-fast search does: a repeat offset one byte ahead, a long
+// (8-byte hash) candidate, else a short (4-byte hash) candidate that a long one at the next byte may
+// replace; matches grow backwards over pending literals, and the second repeat offset is tried at once
+// after every match. Returns the start of the trailing literals.
+fn parse_dfast(data: const u8[:], start: i64, end: i64, head: u32[:], longt: u32[:], base: i64, hshift: i64, lshift: i64, rr: i64[:], seqs: Seq[>..]&, lits: u8[>..]&) -> i64 {
+    var p = start;
+    var anchor = start;
+    while p + 16 <= end {
+        let word = read64(data, p);
+        let hl = (((word * 11400714819323198485) >> 47) as i64) >> lshift;
+        let hs = ((((word as! u32) * 2654435761) >> (32 - HASH_BITS_ZSTD)) as i64) >> hshift;
+        let le = longt[hl];
+        let se = head[hs];
+        let entry = (p + base) as! u32;
+        longt[hl] = entry;
+        head[hs] = entry;
+        var s = p;
+        var mpos: i64 = -1;
+        var mlen: i64 = 0;
+        let w1 = read64(data, p + 1);
+        let o1 = rr[0];
+        if o1 > 0 && p + 1 - o1 >= 0 && ((read64(data, p + 1 - o1) ^ w1) & 4294967295) == 0 {
+            s = p + 1;
+            mpos = s - o1;
+            mlen = 4 + match_at(data, mpos + 4, s + 4, min(131072, end - s) - 4);
+        } else {
+            let cl = le as i64 - base;
+            if cl >= 0 && cl < p && read64(data, cl) == word {
+                mpos = cl;
+                mlen = 8 + match_at(data, cl + 8, p + 8, min(131072, end - p) - 8);
+            } else {
+                let cs = se as i64 - base;
+                if cs >= 0 && cs < p && ((read64(data, cs) ^ word) & 4294967295) == 0 {
+                    let h3 = (((w1 * 11400714819323198485) >> 47) as i64) >> lshift;
+                    let e3 = longt[h3];
+                    longt[h3] = (p + 1 + base) as! u32;
+                    let c3 = e3 as i64 - base;
+                    if c3 >= 0 && c3 <= p && read64(data, c3) == w1 {
+                        s = p + 1;
+                        mpos = c3;
+                        mlen = 8 + match_at(data, c3 + 8, s + 8, min(131072, end - s) - 8);
+                    } else {
+                        mpos = cs;
+                        mlen = 4 + match_at(data, cs + 4, p + 4, min(131072, end - p) - 4);
+                    }
+                }
+            }
+        }
+        if mlen == 0 {
+            // The step grows with the bytes since the last match (libzstd's search strength of 8).
+            p += 1 + ((p - anchor) >> 8);
+            continue;
+        }
+        var pos = mpos;
+        var len = mlen;
+        while s > anchor && pos > 0 && len < 131072 && data[s - 1] == data[pos - 1] { s -= 1; pos -= 1; len += 1; }
+        let ll = s - anchor;
+        let ov = ov_for(s - pos, ll, rr);
+        seqs.push(Seq { ll, len, ov });
+        rep_update(ov, ll, rr);
+        lits.append(data[anchor..s]);
+        dfast_put(data, head, longt, base, hshift, lshift, p + 2);
+        p = s + len;
+        dfast_put(data, head, longt, base, hshift, lshift, p - 2);
+        anchor = p;
+        // A repeat of the second offset right after a match costs almost nothing.
+        while p + 16 <= end && rr[1] > 0 && p - rr[1] >= 0 && ((read64(data, p) ^ read64(data, p - rr[1])) & 4294967295) == 0 {
+            let l = 4 + match_at(data, p - rr[1] + 4, p + 4, min(131072, end - p) - 4);
+            dfast_put(data, head, longt, base, hshift, lshift, p);
+            seqs.push(Seq { 0, l, 1 });
+            rep_update(1, 0, rr);
+            p += l;
+            anchor = p;
+        }
+    }
+    return anchor;
+}
+
 // Encodes data[start..end) as one block. r holds the repeat offsets at the block start and
 // is updated only when the block is written compressed; a raw block leaves it unchanged.
-fn compress_block(data: const u8[:], start: i64, end: i64, head: u64[:], longt: u64[:], base: i64, hshift: i64, lshift: i64, r: i64[:], out: u8[>..]&) {
+fn compress_block(data: const u8[:], start: i64, end: i64, head: u32[:], longt: u32[:], base: i64, hshift: i64, lshift: i64, r: i64[:], out: u8[>..]&) {
     if rle_block(data, start, end, out) { return; }
     var seqs: Seq[>..] = [];
     var lits: u8[>..] = [];
-    var lit_start = start;
-    var p = start;
     var rr: i64[3] = [r[0], r[1], r[2]];
-    while p < end {
-        var best_len: i64 = 0;
-        var best_pos: i64 = -1;
-        var best_ov: i64 = 0;
-        let ll = p - lit_start;
-        let limit = min(131072, end - p);
-        // One current-position word serves repeat checks, both hashes and
-        // the table candidates. Keep the byte rejection before word loads.
-        let have_word = p + 8 <= data.len;
-        let word = if have_word { read64(data, p) } else { 0 };
-        // Repeat-offset candidates that the coding can express at this literal length.
-        var roff: i64[3] = [rr[1], rr[2], rr[0] - 1];
-        if ll > 0 {
-            roff[0] = rr[0];
-            roff[1] = rr[1];
-            roff[2] = rr[2];
-        }
-        // Only the offset of the last literal run is tried, as libzstd's double-fast does (rep1).
-        for k in 1 {
-            let o = roff[k];
-            if o <= 0 || p - o < 0 { continue; }
-            // A candidate can only win if it matches at best_len (for ties the repeat code wins).
-            if best_len > 0 && (best_len >= limit || data[p - o + best_len] != data[p + best_len]) { continue; }
-            let l = if limit >= 8 && have_word {
-                if data[p - o] != (word as! u8) { 0 } else {
-                    let diff = read64(data, p - o) ^ word;
-                    if diff != 0 { ctz(diff) / 8 }
-                    else { 8 + match_at(data, p - o + 8, p + 8, limit - 8) }
-                }
-            } else { match_at(data, p - o, p, limit) };
-            if l >= MIN_MATCH_ZSTD && l >= best_len {
-                best_len = l;
-                best_pos = p - o;
-                best_ov = k + 1;
-            }
-        }
-        if have_word {
-            // Two tables, no chains: the long table hashes 8 bytes, the short one 4.
-            // Both hashes use the same input word. Keep its low 32 bits
-            // for the short hash instead of loading the first bytes again.
-            let hl = (((word * 11400714819323198485) >> 47) as i64) >> lshift;
-            let hs = ((((word as! u32) * 2654435761) >> (32 - HASH_BITS_ZSTD)) as i64) >> hshift;
-            let le = longt[hl];
-            let se = head[hs];
-            let cl = (le & 4294967295) as i64 - base;
-            let cs = (se & 4294967295) as i64 - base;
-            let tag = word & 16777215;
-            let entry = (tag << 32) | ((p + base) as u64);
-            longt[hl] = entry;
-            head[hs] = entry;
-            if cl >= 0 && cl < p && (le >> 32) == tag {
-                // The current word is already loaded for hashing. Reuse it
-                // to resolve short prefixes, or start after eight equal bytes.
-                let l = if limit >= 8 {
-                    if data[cl] != (word as! u8) { 0 } else {
-                        let diff = read64(data, cl) ^ word;
-                        if diff != 0 { ctz(diff) / 8 }
-                        else { 8 + match_at(data, cl + 8, p + 8, limit - 8) }
-                    }
-                } else { match_at(data, cl, p, limit) };
-                if l >= MIN_MATCH_ZSTD && l > best_len {
-                    best_len = l;
-                    best_pos = cl;
-                    best_ov = (p - cl) + 3;
-                }
-            }
-            // The short table is consulted only when neither the long table nor a repeat matched.
-            if best_len == 0 && cs >= 0 && cs < p && cs != cl && (se >> 32) == tag {
-                // The current word is already loaded for hashing. Reuse it
-                // to resolve short prefixes, or start after eight equal bytes.
-                let l = if limit >= 8 {
-                    if data[cs] != (word as! u8) { 0 } else {
-                        let diff = read64(data, cs) ^ word;
-                        if diff != 0 { ctz(diff) / 8 }
-                        else { 8 + match_at(data, cs + 8, p + 8, limit - 8) }
-                    }
-                } else { match_at(data, cs, p, limit) };
-                if l >= MIN_MATCH_ZSTD && l > best_len {
-                    best_len = l;
-                    best_pos = cs;
-                    best_ov = (p - cs) + 3;
-                }
-            }
-        }
-        if best_len >= MIN_MATCH_ZSTD {
-            seqs.push(Seq { ll, best_len, best_ov });
-            rep_update(best_ov, ll, rr);
-            lits.append(data[lit_start..p]);
-            // Fast search: only the last two positions of a match enter the hash chains.
-            // The last two positions of the match, each if its 8 bytes are in the block.
-            let e1 = p + best_len - 2;
-            if e1 + 8 <= data.len {
-                let word1 = read64(data, e1);
-                let hl1 = (((word1 * 11400714819323198485) >> 47) as i64) >> lshift;
-                let hs1 = ((((word1 as! u32) * 2654435761) >> (32 - HASH_BITS_ZSTD)) as i64) >> hshift;
-                longt[hl1] = ((word1 & 16777215) << 32) | ((e1 + base) as u64);
-                head[hs1] = ((word1 & 16777215) << 32) | ((e1 + base) as u64);
-            }
-            if e1 + 9 <= data.len {
-                let word2 = read64(data, e1 + 1);
-                let hl2 = (((word2 * 11400714819323198485) >> 47) as i64) >> lshift;
-                let hs2 = ((((word2 as! u32) * 2654435761) >> (32 - HASH_BITS_ZSTD)) as i64) >> hshift;
-                longt[hl2] = ((word2 & 16777215) << 32) | ((e1 + 1 + base) as u64);
-                head[hs2] = ((word2 & 16777215) << 32) | ((e1 + 1 + base) as u64);
-            }
-            p += best_len;
-            lit_start = p;
-        } else {
-            // Grow the skip by bytes since the last match, not by failed
-            // probes. This is the double-fast byte-distance search strength.
-            p += 1 + ((p - lit_start) >> 7);
-        }
-    }
+    let lit_start = parse_dfast(data, start, end, head, longt, base, hshift, lshift, rr[0..3], seqs, lits);
     emit_block(data, start, end, seqs[0..seqs.len], lits, lit_start, rr[0..3], r, out);
 }
 
@@ -2277,13 +2252,13 @@ fn compress(data: const u8[:], out: u8[>..]&) -> bool {
     let hb = highbit(data.len as i64) + 1;
     let hbits = min(16, max(10, hb));
     let lbits = min(17, max(10, hb + 1));
-    var head: u64[>..] = [];
+    var head: u32[>..] = [];
     head.resize(1 << hbits, 0);
-    var longt: u64[>..] = [];
+    var longt: u32[>..] = [];
     longt.resize(1 << lbits, 0);
     return encode_frame(data, out, head[0..head.len], longt[0..longt.len], 1, 16 - hbits, 17 - lbits);
 }
-fn encode_frame(data: const u8[:], out: u8[>..]&, head: u64[:], longt: u64[:], base: i64, hshift: i64, lshift: i64) -> bool {
+fn encode_frame(data: const u8[:], out: u8[>..]&, head: u32[:], longt: u32[:], base: i64, hshift: i64, lshift: i64) -> bool {
     // Frame header: magic, Frame_Header_Descriptor (single segment, 8-byte content size,
     // content checksum), the content size.
     put_le(out, 4247762216, 4);
@@ -2328,7 +2303,7 @@ fn compress_with(ctx: EncCtx&, data: const u8[:], out: u8[>..]&) -> bool {
 
 // Encoder state kept between calls: hash tables of positions (stored with an offset, see
 // compress_with) and the offset of the next call.
-struct EncCtx { head: u64[65536], longt: u64[131072], base: i64 }
+struct EncCtx { head: u32[65536], longt: u32[131072], base: i64 }
 
 fn enc_new() -> EncCtx {
     return EncCtx { [0; 65536], [0; 131072], 1 };
