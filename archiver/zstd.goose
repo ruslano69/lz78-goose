@@ -791,7 +791,7 @@ let NICE_LEN_ZSTD: i64 = 128;
 
 struct FseCt { tl: i64, tbl: u16[512], dnb: i64[64], dfind: i64[64] }
 struct BitW { acc: u64, count: i64 }
-struct Seq { ll: i64, ml: i64, ov: i64 }
+struct Seq { ll: u32, ml: u32, ov: u32 }
 
 fn fse_ct_new() -> FseCt {
     return FseCt { 0, [0; 512], [0; 64], [0; 64] };
@@ -898,36 +898,54 @@ fn ml_code(v: i64) -> i64 {
     return highbit(v - 3) + 36;
 }
 
-// Sequences of one block as a backward bitstream, in the order the decoder reads them.
-fn encode_sequences(seqs: Seq[:], ll_codes: i64[:], ml_codes: i64[:], of_codes: i64[:], ll_ct: FseCt&, of_ct: FseCt&, ml_ct: FseCt&, out: u8[>..]&) {
-    // Reuse the codes already computed for choosing the FSE tables.
+// Appends the low n bits of v (v < 2^n, n + the pending bits fit 64) to the stream.
+fn bitw_put(out: u8[>..]&, bw: BitW&, v: i64, n: i64) {
+    bw.acc = bw.acc | ((v as u64) << (bw.count as u64));
+    bw.count += n;
+    if bw.count >= 32 {
+        out.push((bw.acc & 255) as u8);
+        out.push(((bw.acc >> 8) & 255) as u8);
+        out.push(((bw.acc >> 16) & 255) as u8);
+        out.push(((bw.acc >> 24) & 255) as u8);
+        bw.acc = bw.acc >> 32;
+        bw.count -= 32;
+    }
+}
+
+// Sequences of one block as a backward bitstream, in the order the decoder reads them. Each sequence
+// writes three groups of bits: the three state transitions, then the literal-length and match-length
+// extras, then the offset extra.
+fn encode_sequences(seqs: Seq[:], ll_ct: FseCt&, of_ct: FseCt&, ml_ct: FseCt&, out: u8[>..]&) {
     let n = seqs.len;
-    assert(ll_codes.len == n && ml_codes.len == n && of_codes.len == n);
     var bw = BitW { 0, 0 };
     let last = seqs[n - 1];
-    let llc = ll_codes[n - 1];
-    let mlc = ml_codes[n - 1];
-    let ofv = last.ov;
-    let ofc = of_codes[n - 1];
+    let llc = ll_code(last.ll);
+    let mlc = ml_code(last.ml);
+    let ofc = highbit(last.ov);
     var st_ll = fse_init(ll_ct, llc);
     var st_of = fse_init(of_ct, ofc);
     var st_ml = fse_init(ml_ct, mlc);
-    bitw_add(out, bw, last.ll - LL_BASE[llc], LL_BITS[llc]);
-    bitw_add(out, bw, last.ml - ML_BASE[mlc], ML_BITS[mlc]);
-    bitw_add(out, bw, ofv - (1 << ofc), ofc);
+    bitw_put(out, bw, (last.ll - LL_BASE[llc]) | ((last.ml - ML_BASE[mlc]) << LL_BITS[llc]), LL_BITS[llc] + ML_BITS[mlc]);
+    bitw_put(out, bw, last.ov - (1 << ofc), ofc);
     var i = n - 2;
     while i >= 0 {
         let s = seqs[i];
-        let llc2 = ll_codes[i];
-        let mlc2 = ml_codes[i];
-        let ofv2 = s.ov;
-        let ofc2 = of_codes[i];
-        st_of = fse_put(out, bw, of_ct, st_of, ofc2);
-        st_ml = fse_put(out, bw, ml_ct, st_ml, mlc2);
-        st_ll = fse_put(out, bw, ll_ct, st_ll, llc2);
-        bitw_add(out, bw, s.ll - LL_BASE[llc2], LL_BITS[llc2]);
-        bitw_add(out, bw, s.ml - ML_BASE[mlc2], ML_BITS[mlc2]);
-        bitw_add(out, bw, ofv2 - (1 << ofc2), ofc2);
+        let llc2 = ll_code(s.ll);
+        let mlc2 = ml_code(s.ml);
+        let ofc2 = highbit(s.ov);
+        let nb_of = (st_of + of_ct.dnb[ofc2]) >> 16;
+        let b_of = st_of & ((1 << nb_of) - 1);
+        st_of = of_ct.tbl[((st_of >> nb_of) + of_ct.dfind[ofc2]) as i64] as i64;
+        let nb_ml = (st_ml + ml_ct.dnb[mlc2]) >> 16;
+        let b_ml = st_ml & ((1 << nb_ml) - 1);
+        st_ml = ml_ct.tbl[((st_ml >> nb_ml) + ml_ct.dfind[mlc2]) as i64] as i64;
+        let nb_ll = (st_ll + ll_ct.dnb[llc2]) >> 16;
+        let b_ll = st_ll & ((1 << nb_ll) - 1);
+        st_ll = ll_ct.tbl[((st_ll >> nb_ll) + ll_ct.dfind[llc2]) as i64] as i64;
+        bitw_put(out, bw, b_of | (b_ml << nb_of) | (b_ll << (nb_of + nb_ml)), nb_of + nb_ml + nb_ll);
+        let llb = LL_BITS[llc2];
+        bitw_put(out, bw, (s.ll - LL_BASE[llc2]) | ((s.ml - ML_BASE[mlc2]) << llb), llb + ML_BITS[mlc2]);
+        bitw_put(out, bw, s.ov - (1 << ofc2), ofc2);
         i -= 1;
     }
     bitw_add(out, bw, st_ml - of_size(ml_ct), ml_ct.tl);
@@ -999,20 +1017,48 @@ fn huf_lengths(freq: i64[:], maxbits: i64, lengths: i64[:]) -> bool {
         let f = freq[order[i]] as u64;
         weight[i] = if f > 0 { f } else { 1 };
     }
-    // Insertion sort by weight: m is at most 288, so this is cheap next to the symbol loop.
-    var i: i64 = 1;
-    while i < m {
-        var j = i;
-        while j > 0 && weight[j - 1] > weight[j] {
-            let tw = weight[j];
-            weight[j] = weight[j - 1];
-            weight[j - 1] = tw;
-            let to = order[j];
-            order[j] = order[j - 1];
-            order[j - 1] = to;
-            j -= 1;
+    // Sort by weight, ascending and stable. Weights below 2^18 (any block's literal counts) go through two
+    // radix passes of nine bits; anything larger falls back to an insertion sort.
+    var top: u64 = 0;
+    for i in m { if weight[i] > top { top = weight[i]; } }
+    if top < 262144 {
+        var cnt: i64[512] = [0; 512];
+        var to_: i64[288] = [0; 288];
+        var tw_: u64[288] = [0; 288];
+        for i in m { cnt[(weight[i] & 511) as i64] += 1; }
+        var sum: i64 = 0;
+        for k in 512 { let c = cnt[k]; cnt[k] = sum; sum += c; }
+        for i in m {
+            let k = (weight[i] & 511) as i64;
+            to_[cnt[k]] = order[i];
+            tw_[cnt[k]] = weight[i];
+            cnt[k] += 1;
         }
-        i += 1;
+        for k in 512 { cnt[k] = 0; }
+        for i in m { cnt[(tw_[i] >> 9) as i64] += 1; }
+        sum = 0;
+        for k in 512 { let c = cnt[k]; cnt[k] = sum; sum += c; }
+        for i in m {
+            let k = (tw_[i] >> 9) as i64;
+            order[cnt[k]] = to_[i];
+            weight[cnt[k]] = tw_[i];
+            cnt[k] += 1;
+        }
+    } else {
+        var i: i64 = 1;
+        while i < m {
+            var j = i;
+            while j > 0 && weight[j - 1] > weight[j] {
+                let tw = weight[j];
+                weight[j] = weight[j - 1];
+                weight[j - 1] = tw;
+                let to = order[j];
+                order[j] = order[j - 1];
+                order[j - 1] = to;
+                j -= 1;
+            }
+            i += 1;
+        }
     }
     // Two-queue Huffman: leaves 0..m-1, internal nodes m..2m-2.
     var li: i64 = 0;
@@ -1111,10 +1157,16 @@ fn huf_codes(lens: i64[:], nsym: i64, tl: i64, codes: i64[:]) {
 fn huf_put_stream(lits: const u8[:], lens: i64[:], codes: i64[:], out: u8[>..]&) {
     var bw = BitW { 0, 0 };
     var i = lits.len - 1;
-    while i >= 0 {
-        let s = lits[i] as i64;
-        bitw_add(out, bw, codes[s], lens[s]);
-        i -= 1;
+    // Two codes per write (at most 22 bits): half as many flush tests.
+    while i >= 1 {
+        let s1 = lits[i] as i64;
+        let s2 = lits[i - 1] as i64;
+        bitw_put(out, bw, codes[s1] | (codes[s2] << lens[s1]), lens[s1] + lens[s2]);
+        i -= 2;
+    }
+    if i == 0 {
+        let s = lits[0] as i64;
+        bitw_put(out, bw, codes[s], lens[s]);
     }
     bitw_close(out, bw);
 }
@@ -1352,9 +1404,7 @@ fn put_fse_weights(w: i64[:], nw: i64, out: u8[>..]&) -> i64 {
 // Chooses the FSE table for one sequence kind: the predefined table (mode 0) or a table built
 // from this block's code counts (mode 2, header written to hdr), whichever codes the codes in
 // fewer bits including the header. ct receives the table the encoder uses.
-fn choose_seq_table(codes: i64[:], n: i64, nsym: i64, dnorm: i64[:], dacc: i64, acc: i64, ct: FseCt&, hdr: u8[>..]&) -> i64 {
-    var counts: i64[64] = [0; 64];
-    for i in n { counts[codes[i]] += 1; }
+fn choose_seq_table(counts: i64[:], n: i64, nsym: i64, dnorm: i64[:], dacc: i64, acc: i64, ct: FseCt&, hdr: u8[>..]&) -> i64 {
     var cost_pre: i64 = 0;
     for s in nsym {
         let m = if dnorm[s] < 0 { -dnorm[s] } else { dnorm[s] };
@@ -1540,7 +1590,7 @@ fn parse_dfast(data: const u8[:], start: i64, end: i64, head: u32[:], longt: u32
         while s > anchor && pos > 0 && len < 131072 && data[s - 1] == data[pos - 1] { s -= 1; pos -= 1; len += 1; }
         let ll = s - anchor;
         let ov = ov_for(s - pos, ll, rr);
-        seqs.push(Seq { ll, len, ov });
+        seqs.push(Seq { ll as! u32, len as! u32, ov as! u32 });
         rep_update(ov, ll, rr);
         lits.append(data[anchor..s]);
         dfast_put(data, head, longt, base, hshift, lshift, p + 2);
@@ -1551,7 +1601,7 @@ fn parse_dfast(data: const u8[:], start: i64, end: i64, head: u32[:], longt: u32
         while p + 16 <= end && rr[1] > 0 && p - rr[1] >= 0 && ((read64(data, p) ^ read64(data, p - rr[1])) & 4294967295) == 0 {
             let l = 4 + match_at(data, p - rr[1] + 4, p + 4, min(131072, end - p) - 4);
             dfast_put(data, head, longt, base, hshift, lshift, p);
-            seqs.push(Seq { 0, l, 1 });
+            seqs.push(Seq { 0, l as! u32, 1 });
             rep_update(1, 0, rr);
             p += l;
             anchor = p;
@@ -1606,13 +1656,13 @@ fn emit_block(data: const u8[:], start: i64, end: i64, seqs: Seq[:], lits: u8[>.
         put_le(body, n - 0x7F00, 2);
     }
     if n > 0 {
-        var llc: i64[>..] = [];
-        var mlc: i64[>..] = [];
-        var ofc: i64[>..] = [];
+        var llc: i64[64] = [0; 64];
+        var mlc: i64[64] = [0; 64];
+        var ofc: i64[64] = [0; 64];
         for i in n {
-            llc.push(ll_code(seqs[i].ll));
-            mlc.push(ml_code(seqs[i].ml));
-            ofc.push(highbit(seqs[i].ov));
+            llc[ll_code(seqs[i].ll)] += 1;
+            mlc[ml_code(seqs[i].ml)] += 1;
+            ofc[highbit(seqs[i].ov)] += 1;
         }
         var ll_ct = fse_ct_new();
         var of_ct = fse_ct_new();
@@ -1620,12 +1670,12 @@ fn emit_block(data: const u8[:], start: i64, end: i64, seqs: Seq[:], lits: u8[>.
         var tables: u8[>..] = [];
         // Normalize new tables over 256 states for finer frequency precision;
         // predefined tables retain their format-defined logs.
-        let m_ll = choose_seq_table(llc[0..n], n, 36, LL_DEFAULT, 6, 8, ll_ct, tables);
-        let m_of = choose_seq_table(ofc[0..n], n, 29, OF_DEFAULT, 5, 8, of_ct, tables);
-        let m_ml = choose_seq_table(mlc[0..n], n, 53, ML_DEFAULT, 6, 8, ml_ct, tables);
+        let m_ll = choose_seq_table(llc[0..64], n, 36, LL_DEFAULT, 6, 8, ll_ct, tables);
+        let m_of = choose_seq_table(ofc[0..64], n, 29, OF_DEFAULT, 5, 8, of_ct, tables);
+        let m_ml = choose_seq_table(mlc[0..64], n, 53, ML_DEFAULT, 6, 8, ml_ct, tables);
         body.push(((m_ll << 6) | (m_of << 4) | (m_ml << 2)) as u8);
         body.append(tables[0..tables.len]);
-        encode_sequences(seqs[0..n], llc[0..n], mlc[0..n], ofc[0..n], ll_ct, of_ct, ml_ct, body);
+        encode_sequences(seqs[0..n], ll_ct, of_ct, ml_ct, body);
     }
     let raw = end - start;
     if n == 0 || body.len >= raw {
@@ -1772,7 +1822,7 @@ fn parse_chain(data: const u8[:], start: i64, end: i64, head: u32[:], prev: u32[
         while s > anchor && pos > 0 && len < 131072 && data[s - 1] == data[pos - 1] { s -= 1; pos -= 1; len += 1; }
         let ll = s - anchor;
         let ov = ov_for(s - pos, ll, rr);
-        seqs.push(Seq { ll, len, ov });
+        seqs.push(Seq { ll as! u32, len as! u32, ov as! u32 });
         rep_update(ov, ll, rr);
         lits.append(data[anchor..s]);
         p = s + len;
@@ -2087,7 +2137,7 @@ fn opt_parse(data: const u8[:], start: i64, end: i64, cidx: i64[:], clen: i64[:]
             let len = blen[t];
             let ll = s - anchor;
             let ov = ov_for(boff[t], ll, rr);
-            seqs.push(Seq { ll, len, ov });
+            seqs.push(Seq { ll as! u32, len as! u32, ov as! u32 });
             rep_update(ov, ll, rr);
             lits.append(data[anchor..s]);
             anchor = s + len;
