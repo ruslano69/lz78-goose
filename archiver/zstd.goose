@@ -1440,9 +1440,8 @@ fn match_at(data: const u8[:], a: i64, p: i64, limit: i64) -> i64 {
     return l;
 }
 
-// Encodes data[start..end) as one block. r holds the repeat offsets at the block start and
-// is updated only when the block is written compressed; a raw block leaves it unchanged.
-fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: i32[:], base: i64, hshift: i64, lshift: i64, r: i64[:], out: u8[>..]&) {
+// Writes a uniform block as a standard RLE block; false when the bytes differ.
+fn rle_block(data: const u8[:], start: i64, end: i64, out: u8[>..]&) -> bool {
     // A uniform block needs one byte, no match tables or entropy coding.
     // Reject ordinary input after inspecting only the first word.
     let raw_size = end - start;
@@ -1466,9 +1465,16 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: 
             // RLE blocks preserve the repeat-offset history.
             put_le(out, 2 | (raw_size << 3), 3);
             out.push(byte);
-            return;
+            return true;
         }
     }
+    return false;
+}
+
+// Encodes data[start..end) as one block. r holds the repeat offsets at the block start and
+// is updated only when the block is written compressed; a raw block leaves it unchanged.
+fn compress_block(data: const u8[:], start: i64, end: i64, head: u64[:], longt: u64[:], base: i64, hshift: i64, lshift: i64, r: i64[:], out: u8[>..]&) {
+    if rle_block(data, start, end, out) { return; }
     var seqs: Seq[>..] = [];
     var lits: u8[>..] = [];
     var lit_start = start;
@@ -1516,11 +1522,15 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: 
             // for the short hash instead of loading the first bytes again.
             let hl = (((word * 11400714819323198485) >> 47) as i64) >> lshift;
             let hs = ((((word as! u32) * 2654435761) >> (32 - HASH_BITS_ZSTD)) as i64) >> hshift;
-            let cl = longt[hl] as i64 - base;
-            let cs = head[hs] as i64 - base;
-            longt[hl] = (p + base) as i32;
-            head[hs] = (p + base) as i32;
-            if cl >= 0 && cl < p {
+            let le = longt[hl];
+            let se = head[hs];
+            let cl = (le & 4294967295) as i64 - base;
+            let cs = (se & 4294967295) as i64 - base;
+            let tag = word & 16777215;
+            let entry = (tag << 32) | ((p + base) as u64);
+            longt[hl] = entry;
+            head[hs] = entry;
+            if cl >= 0 && cl < p && (le >> 32) == tag {
                 // The current word is already loaded for hashing. Reuse it
                 // to resolve short prefixes, or start after eight equal bytes.
                 let l = if limit >= 8 {
@@ -1537,7 +1547,7 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: 
                 }
             }
             // The short table is consulted only when neither the long table nor a repeat matched.
-            if best_len == 0 && cs >= 0 && cs < p && cs != cl {
+            if best_len == 0 && cs >= 0 && cs < p && cs != cl && (se >> 32) == tag {
                 // The current word is already loaded for hashing. Reuse it
                 // to resolve short prefixes, or start after eight equal bytes.
                 let l = if limit >= 8 {
@@ -1565,15 +1575,15 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: 
                 let word1 = read64(data, e1);
                 let hl1 = (((word1 * 11400714819323198485) >> 47) as i64) >> lshift;
                 let hs1 = ((((word1 as! u32) * 2654435761) >> (32 - HASH_BITS_ZSTD)) as i64) >> hshift;
-                longt[hl1] = (e1 + base) as i32;
-                head[hs1] = (e1 + base) as i32;
+                longt[hl1] = ((word1 & 16777215) << 32) | ((e1 + base) as u64);
+                head[hs1] = ((word1 & 16777215) << 32) | ((e1 + base) as u64);
             }
             if e1 + 9 <= data.len {
                 let word2 = read64(data, e1 + 1);
                 let hl2 = (((word2 * 11400714819323198485) >> 47) as i64) >> lshift;
                 let hs2 = ((((word2 as! u32) * 2654435761) >> (32 - HASH_BITS_ZSTD)) as i64) >> hshift;
-                longt[hl2] = (e1 + 1 + base) as i32;
-                head[hs2] = (e1 + 1 + base) as i32;
+                longt[hl2] = ((word2 & 16777215) << 32) | ((e1 + 1 + base) as u64);
+                head[hs2] = ((word2 & 16777215) << 32) | ((e1 + 1 + base) as u64);
             }
             p += best_len;
             lit_start = p;
@@ -1583,6 +1593,13 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: 
             p += 1 + ((p - lit_start) >> 7);
         }
     }
+    emit_block(data, start, end, seqs[0..seqs.len], lits, lit_start, rr[0..3], r, out);
+}
+
+// Entropy-codes the parsed sequences and the literals data[lit_start..end) as one block, or writes
+// a raw block when that is not smaller. rr holds the repeat offsets after the sequences; they are
+// copied to r only when the block is written compressed.
+fn emit_block(data: const u8[:], start: i64, end: i64, seqs: Seq[:], lits: u8[>..]&, lit_start: i64, rr: i64[:], r: i64[:], out: u8[>..]&) {
     // With no sequence this encoder always writes a raw block. Do not build
     // literal buffers or run Huffman on data that will be discarded.
     if seqs.len == 0 {
@@ -1651,19 +1668,605 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: 
     }
 }
 
+// ---- Levels 4 and up: hash-chain matches with greedy or lazy parsing ----
+
+// A match: the position it starts at in the history and its length; rep marks a repeat offset.
+struct Found { len: i64, pos: i64, rep: bool }
+
+// Zstd's gain estimate: four points per byte saved, minus the bits an offset costs.
+fn match_gain(f: Found, p: i64) -> i64 {
+    if f.len == 0 { return -1; }
+    return f.len * 4 - (if f.rep { 1 } else { highbit(p - f.pos + 1) });
+}
+
+fn chain_hash(word: u64, hbits: i64) -> i64 {
+    return (((word << 24) * 889523592379) >> (64 - hbits)) as i64;
+}
+
+// head[h] holds the newest position + 1 whose 5 bytes hash to h; prev[pos & mask] the position + 1
+// that head held before pos was inserted.
+fn chain_insert(data: const u8[:], head: u32[:], prev: u32[:], hbits: i64, mask: i64, from: i64, to: i64) {
+    var q = from;
+    while q < to {
+        if q + 8 <= data.len {
+            let h = chain_hash(read64(data, q), hbits);
+            prev[q & mask] = head[h];
+            head[h] = (q + 1) as! u32;
+        }
+        q += 1;
+    }
+}
+
+// Longest match for p along its hash chain, at most `attempts` candidates, none further back than the window.
+fn chain_search(data: const u8[:], head: u32[:], prev: u32[:], hbits: i64, mask: i64, p: i64, limit: i64, attempts: i64) -> Found {
+    var best = Found { 0, -1, false };
+    if p + 8 > data.len { return best; }
+    var cand = head[chain_hash(read64(data, p), hbits)] as i64 - 1;
+    var n: i64 = 0;
+    while cand >= 0 && p - cand <= mask && n < attempts {
+        if best.len == 0 || (best.len < limit && data[cand + best.len] == data[p + best.len]) {
+            let l = match_at(data, cand, p, limit);
+            if l > best.len {
+                best.len = l;
+                best.pos = cand;
+                if l >= limit { break; }
+            }
+        }
+        cand = prev[cand & mask] as i64 - 1;
+        n += 1;
+    }
+    return best;
+}
+
+// Repeat-offset code for offset `off` after `ll` literals: 1..3, else off + 3 (see rep_update).
+fn ov_for(off: i64, ll: i64, rr: i64[:]) -> i64 {
+    if ll > 0 {
+        for k in 3 { if rr[k] == off { return k + 1; } }
+    } else {
+        if rr[1] == off { return 1; }
+        if rr[2] == off { return 2; }
+        if rr[0] - 1 == off { return 3; }
+    }
+    return off + 3;
+}
+
+// Best of the repeat offsets and the hash chain for position p, which follows `ll` literals.
+fn find_at(data: const u8[:], head: u32[:], prev: u32[:], hbits: i64, mask: i64, p: i64, end: i64, ll: i64, rr: i64[:], attempts: i64) -> Found {
+    let limit = min(131072, end - p);
+    var best = chain_search(data, head, prev, hbits, mask, p, limit, attempts);
+    if best.len < 5 { best.len = 0; best.pos = -1; }
+    let roff: i64[3] = if ll > 0 { [rr[0], rr[1], rr[2]] } else { [rr[1], rr[2], rr[0] - 1] };
+    for k in 3 {
+        let o = roff[k];
+        if o <= 0 || p - o < 0 { continue; }
+        let l = match_at(data, p - o, p, limit);
+        if l >= MIN_MATCH_ZSTD {
+            let f = Found { l, p - o, true };
+            if match_gain(f, p) >= match_gain(best, p) { best = f; }
+        }
+    }
+    return best;
+}
+
+// Parses data[start..end) into sequences. depth 0 is greedy; 1 and 2 look one or two positions
+// ahead for a better match. Returns the start of the trailing literals.
+fn parse_chain(data: const u8[:], start: i64, end: i64, head: u32[:], prev: u32[:], hbits: i64, mask: i64, depth: i64, attempts: i64, rr: i64[:], seqs: Seq[>..]&, lits: u8[>..]&) -> i64 {
+    var p = start;
+    var anchor = start;
+    var next = start;
+    while p < end {
+        if p > next { chain_insert(data, head, prev, hbits, mask, next, p); next = p; }
+        var m = find_at(data, head, prev, hbits, mask, p, end, p - anchor, rr, attempts);
+        if m.len == 0 {
+            p += 1 + ((p - anchor) >> 8);
+            continue;
+        }
+        while depth > 0 {
+            var improved = false;
+            var q = p + 1;
+            if q < end {
+                if q > next { chain_insert(data, head, prev, hbits, mask, next, q); next = q; }
+                let m2 = find_at(data, head, prev, hbits, mask, q, end, q - anchor, rr, attempts);
+                if m2.len > 0 && match_gain(m2, q) > match_gain(m, p) + 4 { m = m2; p = q; improved = true; }
+            }
+            q = p + 2;
+            if !improved && depth > 1 && q < end {
+                if q > next { chain_insert(data, head, prev, hbits, mask, next, q); next = q; }
+                let m2 = find_at(data, head, prev, hbits, mask, q, end, q - anchor, rr, attempts);
+                if m2.len > 0 && match_gain(m2, q) > match_gain(m, p) + 7 { m = m2; p = q; improved = true; }
+            }
+            if !improved { break; }
+        }
+        // Extend backwards over the pending literals.
+        var s = p;
+        var pos = m.pos;
+        var len = m.len;
+        while s > anchor && pos > 0 && len < 131072 && data[s - 1] == data[pos - 1] { s -= 1; pos -= 1; len += 1; }
+        let ll = s - anchor;
+        let ov = ov_for(s - pos, ll, rr);
+        seqs.push(Seq { ll, len, ov });
+        rep_update(ov, ll, rr);
+        lits.append(data[anchor..s]);
+        p = s + len;
+        anchor = p;
+    }
+    if end > next { chain_insert(data, head, prev, hbits, mask, next, end); }
+    return anchor;
+}
+
+fn compress_block_chain(data: const u8[:], start: i64, end: i64, head: u32[:], prev: u32[:], hbits: i64, mask: i64, depth: i64, attempts: i64, r: i64[:], out: u8[>..]&) {
+    if rle_block(data, start, end, out) {
+        // The parser skips this block; its positions still enter the chains.
+        chain_insert(data, head, prev, hbits, mask, start, end);
+        return;
+    }
+    var seqs: Seq[>..] = [];
+    var lits: u8[>..] = [];
+    var rr: i64[3] = [r[0], r[1], r[2]];
+    let lit_start = parse_chain(data, start, end, head, prev, hbits, mask, depth, attempts, rr[0..3], seqs, lits);
+    emit_block(data, start, end, seqs[0..seqs.len], lits, lit_start, rr[0..3], r, out);
+}
+
+// ---- Levels 13 and up: binary-tree matches and optimal parsing ----
+
+let OPT_NUM: i64 = 4096;
+let OPT_INF: i64 = 1152921504606846976;
+// Layout of the price table, in 1/256 bit: literals, then the LL, ML and offset codes.
+let PR_LL: i64 = 256;
+let PR_ML: i64 = 292;
+let PR_OF: i64 = 345;
+let PR_SIZE: i64 = 377;
+
+// log2(x) in 1/256 bit.
+fn log2_fp(x: i64) -> i64 {
+    if x <= 1 { return 0; }
+    let h = highbit(x);
+    var m: i64 = if h >= 30 { x >> (h - 30) } else { x << (30 - h) };
+    var r = h * 256;
+    var bit: i64 = 128;
+    while bit > 0 {
+        m = (m * m) >> 30;
+        if m >= 2147483648 { m = m >> 1; r += bit; }
+        bit = bit >> 1;
+    }
+    return r;
+}
+
+// Price of each symbol as -log2 of its share of the counts (all counts start at one).
+fn price_set(pr: i64[:], at: i64, c: i64[:], n: i64) {
+    var total: i64 = 0;
+    for i in n { total += c[i] + 1; }
+    let lt = log2_fp(total);
+    for i in n { pr[at + i] = lt - log2_fp(c[i] + 1); }
+}
+
+fn set_prices(pr: i64[:], litc: i64[:], llc: i64[:], mlc: i64[:], ofc: i64[:]) {
+    // Literals cost the length of their Huffman code; a byte without a code is priced above the longest.
+    var lens: i64[256] = [0; 256];
+    var distinct: i64 = 0;
+    for i in 256 { if litc[i] > 0 { distinct += 1; } }
+    if distinct >= 2 && huf_lengths(litc, 11, lens[0..256]) {
+        for i in 256 { pr[i] = (if lens[i] > 0 { lens[i] } else { 12 }) * 256; }
+    } else {
+        price_set(pr, 0, litc, 256);
+    }
+    price_set(pr, PR_LL, llc, 36);
+    price_set(pr, PR_ML, mlc, 53);
+    price_set(pr, PR_OF, ofc, 32);
+}
+
+// Counts of the predefined distributions, the first guess of a block's statistics.
+fn default_counts(llc: i64[:], mlc: i64[:], ofc: i64[:]) {
+    for i in 36 { llc[i] = if LL_DEFAULT[i] < 0 { 1 } else { LL_DEFAULT[i] }; }
+    for i in 53 { mlc[i] = if ML_DEFAULT[i] < 0 { 1 } else { ML_DEFAULT[i] }; }
+    for i in 29 { ofc[i] = if OF_DEFAULT[i] < 0 { 1 } else { OF_DEFAULT[i] }; }
+}
+
+fn llp(pr: i64[:], v: i64) -> i64 {
+    let c = ll_code(min(v, 131071));
+    return pr[PR_LL + c] + LL_BITS[c] * 256;
+}
+fn mlp(pr: i64[:], v: i64) -> i64 {
+    let c = ml_code(v);
+    return pr[PR_ML + c] + ML_BITS[c] * 256;
+}
+fn ofp(pr: i64[:], ov: i64) -> i64 {
+    let c = highbit(ov);
+    return pr[PR_OF + c] + c * 256;
+}
+
+fn bt_hash(word: u64, hbits: i64) -> i64 {
+    return ((((word as! u32) * 2654435761) >> (32 - hbits)) as i64);
+}
+
+// Inserts position p into the binary tree of its 4-byte hash (tree[2 * (pos & mask)] is the smaller
+// child + 1, the next entry the larger one) and, when collect is set, appends the matches found on
+// the way down in strictly increasing length, three bytes or more and clipped to blk_limit.
+// Returns how many were appended. Without collect only the insertion happens, over a short prefix.
+fn bt_find(data: const u8[:], head: u32[:], h3: u32[:], tree: u32[:], hbits: i64, mask: i64, p: i64, blk_limit: i64, depth: i64, nice: i64, collect: bool, mlen: i64[>..]&, moff: i64[>..]&) -> i64 {
+    if p + 8 > data.len { return 0; }
+    let tl = if collect { min(131072, data.len - p) } else { min(nice, data.len - p) };
+    let word = read64(data, p);
+    let h = bt_hash(word, hbits);
+    var cur = head[h] as i64 - 1;
+    head[h] = (p + 1) as! u32;
+    // Three-byte matches come from a table of the last position of each 3-byte string, only when close.
+    let k3 = (((word & 16777215) * 889523592379) >> 47) as i64;
+    let c3 = h3[k3] as i64 - 1;
+    h3[k3] = (p + 1) as! u32;
+    var sm = 2 * (p & mask);
+    var lg = sm + 1;
+    var len_s: i64 = 0;
+    var len_l: i64 = 0;
+    var best: i64 = 2;
+    var count: i64 = 0;
+    if collect && c3 >= 0 && p - c3 < 262144 {
+        let l3 = min(match_at(data, c3, p, min(tl, blk_limit)), blk_limit);
+        if l3 >= 3 { best = l3; mlen.push(l3); moff.push(p - c3); count += 1; }
+    }
+    var n = depth;
+    while cur >= 0 && p - cur <= mask && n > 0 {
+        n -= 1;
+        let clen = min(len_s, len_l);
+        let len = clen + match_at(data, cur + clen, p + clen, tl - clen);
+        if collect {
+            let lc = min(len, blk_limit);
+            if lc > best { best = lc; mlen.push(lc); moff.push(p - cur); count += 1; }
+        }
+        if len >= nice || len >= tl {
+            // Further ordering is not needed (or possible): the new node takes over cur's children.
+            tree[sm] = tree[2 * (cur & mask)];
+            tree[lg] = tree[2 * (cur & mask) + 1];
+            return count;
+        }
+        if data[cur + len] < data[p + len] {
+            tree[sm] = (cur + 1) as! u32;
+            sm = 2 * (cur & mask) + 1;
+            len_s = len;
+            cur = tree[sm] as i64 - 1;
+        } else {
+            tree[lg] = (cur + 1) as! u32;
+            lg = 2 * (cur & mask);
+            len_l = len;
+            cur = tree[lg] as i64 - 1;
+        }
+    }
+    tree[sm] = 0;
+    tree[lg] = 0;
+    return count;
+}
+
+// Optimal parse of data[start..end) from the matches cached for each position (cidx, clen, coff).
+// opt holds 8 values per position: price, match length (0 for a literal), offset, pending literals,
+// then the three repeat offsets. Returns the start of the trailing literals.
+fn opt_parse(data: const u8[:], start: i64, end: i64, cidx: i64[:], clen: i64[:], coff: i64[:], pr: i64[:], opt: i64[:], nice: i64, rr: i64[:], seqs: Seq[>..]&, lits: u8[>..]&) -> i64 {
+    var p = start;
+    var anchor = start;
+    let llz = llp(pr, 0);
+    while p < end {
+        let ll0 = p - anchor;
+        opt[0] = llp(pr, ll0);
+        opt[1] = 0;
+        opt[2] = 0;
+        opt[3] = ll0;
+        opt[4] = rr[0];
+        opt[5] = rr[1];
+        opt[6] = rr[2];
+        var last: i64 = 0;
+        var cur: i64 = 0;
+        var jump_len: i64 = 0;
+        var jump_off: i64 = 0;
+        while true {
+            if cur > 0 {
+                // Reaching cur by one more literal.
+                let pb = (cur - 1) * 8;
+                let ln = opt[pb + 3];
+                let c = opt[pb] + pr[data[p + cur - 1] as i64] + llp(pr, ln + 1) - llp(pr, ln);
+                let ob = cur * 8;
+                if c <= opt[ob] {
+                    opt[ob] = c;
+                    opt[ob + 1] = 0;
+                    opt[ob + 2] = 0;
+                    opt[ob + 3] = ln + 1;
+                    opt[ob + 4] = opt[pb + 4];
+                    opt[ob + 5] = opt[pb + 5];
+                    opt[ob + 6] = opt[pb + 6];
+                }
+                if cur == last { break; }
+            }
+            let q = p + cur;
+            let cb = cur * 8;
+            let lq = opt[cb + 3];
+            let base = opt[cb];
+            let r0 = opt[cb + 4];
+            let r1 = opt[cb + 5];
+            let r2 = opt[cb + 6];
+            var rv: i64[3] = [r0, r1, r2];
+            let limit = min(131072, end - q);
+            let roff: i64[3] = if lq > 0 { [r0, r1, r2] } else { [r1, r2, r0 - 1] };
+            var rl: i64[3] = [0, 0, 0];
+            var longest: i64 = 0;
+            var long_off: i64 = 0;
+            for k in 3 {
+                let o = roff[k];
+                if o <= 0 || q - o < 0 { continue; }
+                let l = match_at(data, q - o, q, limit);
+                if l >= MIN_MATCH_ZSTD {
+                    rl[k] = l;
+                    if l > longest { longest = l; long_off = o; }
+                }
+            }
+            let i0 = cidx[q - start];
+            let i1 = cidx[q - start + 1];
+            if i1 > i0 && clen[i1 - 1] > longest { longest = clen[i1 - 1]; long_off = coff[i1 - 1]; }
+            if longest > 0 && (longest >= nice || cur + longest >= OPT_NUM) {
+                jump_len = longest;
+                jump_off = long_off;
+                break;
+            }
+            for k in 3 {
+                let l = rl[k];
+                if l == 0 { continue; }
+                var nr: i64[3] = [r0, r1, r2];
+                rep_update(k + 1, lq, nr[0..3]);
+                let pre = base + ofp(pr, k + 1) + llz;
+                if cur + l > last {
+                    var j = last + 1;
+                    while j <= cur + l { opt[j * 8] = OPT_INF; j += 1; }
+                    last = cur + l;
+                }
+                var len: i64 = 3;
+                while len <= l {
+                    let c = pre + mlp(pr, len);
+                    let eb = (cur + len) * 8;
+                    if c < opt[eb] {
+                        opt[eb] = c;
+                        opt[eb + 1] = len;
+                        opt[eb + 2] = roff[k];
+                        opt[eb + 3] = 0;
+                        opt[eb + 4] = nr[0];
+                        opt[eb + 5] = nr[1];
+                        opt[eb + 6] = nr[2];
+                    }
+                    len += 1;
+                }
+            }
+            var prevl: i64 = 2;
+            var i = i0;
+            while i < i1 {
+                let l = clen[i];
+                let off = coff[i];
+                let ov = ov_for(off, lq, rv[0..3]);
+                var nr: i64[3] = [r0, r1, r2];
+                rep_update(ov, lq, nr[0..3]);
+                let pre = base + ofp(pr, ov) + llz;
+                if cur + l > last {
+                    var j = last + 1;
+                    while j <= cur + l { opt[j * 8] = OPT_INF; j += 1; }
+                    last = cur + l;
+                }
+                var len = prevl + 1;
+                while len <= l {
+                    let c = pre + mlp(pr, len);
+                    let eb = (cur + len) * 8;
+                    if c < opt[eb] {
+                        opt[eb] = c;
+                        opt[eb + 1] = len;
+                        opt[eb + 2] = off;
+                        opt[eb + 3] = 0;
+                        opt[eb + 4] = nr[0];
+                        opt[eb + 5] = nr[1];
+                        opt[eb + 6] = nr[2];
+                    }
+                    len += 1;
+                }
+                prevl = l;
+                i += 1;
+            }
+            if last == 0 { break; }
+            cur += 1;
+        }
+        var from: i64 = 0;
+        var seg: i64 = 0;
+        if jump_len > 0 {
+            from = cur;
+            seg = cur + jump_len;
+        } else if last > 0 {
+            from = last;
+            seg = last;
+        } else {
+            p += 1;
+            continue;
+        }
+        // Walk the chosen path back, then emit it forwards. A jump match comes last.
+        var bpos: i64[>..] = [];
+        var blen: i64[>..] = [];
+        var boff: i64[>..] = [];
+        if jump_len > 0 { bpos.push(cur); blen.push(jump_len); boff.push(jump_off); }
+        var i = from;
+        while i > 0 {
+            let ml = opt[i * 8 + 1];
+            if ml == 0 { i -= 1; } else {
+                bpos.push(i - ml);
+                blen.push(ml);
+                boff.push(opt[i * 8 + 2]);
+                i -= ml;
+            }
+        }
+        var t = bpos.len - 1;
+        while t >= 0 {
+            let s = p + bpos[t];
+            let len = blen[t];
+            let ll = s - anchor;
+            let ov = ov_for(boff[t], ll, rr);
+            seqs.push(Seq { ll, len, ov });
+            rep_update(ov, ll, rr);
+            lits.append(data[anchor..s]);
+            anchor = s + len;
+            t -= 1;
+        }
+        p += seg;
+    }
+    return anchor;
+}
+
+// Re-estimates the block's statistics from a parse with the current prices.
+fn stats_pass(data: const u8[:], start: i64, end: i64, cidx: i64[:], clen: i64[:], coff: i64[:], pr: i64[:], opt: i64[:], nice: i64, r: i64[:], litc: i64[:], llc: i64[:], mlc: i64[:], ofc: i64[:]) {
+    var seqs: Seq[>..] = [];
+    var lits: u8[>..] = [];
+    var rr: i64[3] = [r[0], r[1], r[2]];
+    let lit_start = opt_parse(data, start, end, cidx, clen, coff, pr, opt, nice, rr[0..3], seqs, lits);
+    count_stats(data, end, seqs[0..seqs.len], lits, lit_start, litc, llc, mlc, ofc);
+    set_prices(pr, litc, llc, mlc, ofc);
+}
+
+fn count_stats(data: const u8[:], end: i64, seqs: Seq[:], lits: u8[>..]&, lit_start: i64, litc: i64[:], llc: i64[:], mlc: i64[:], ofc: i64[:]) {
+    for i in 256 { litc[i] = 0; }
+    for i in 36 { llc[i] = 0; }
+    for i in 53 { mlc[i] = 0; }
+    for i in 32 { ofc[i] = 0; }
+    for i in lits.len { litc[lits[i] as i64] += 1; }
+    for i in end - lit_start { litc[data[lit_start + i] as i64] += 1; }
+    for i in seqs.len {
+        llc[ll_code(seqs[i].ll)] += 1;
+        mlc[ml_code(seqs[i].ml)] += 1;
+        ofc[highbit(seqs[i].ov)] += 1;
+    }
+}
+
+fn compress_block_opt(data: const u8[:], start: i64, end: i64, head: u32[:], h3: u32[:], tree: u32[:], hbits: i64, mask: i64, depth: i64, nice: i64, passes: i64, opt: i64[:], r: i64[:], out: u8[>..]&) {
+    var clen: i64[>..] = [];
+    var coff: i64[>..] = [];
+    if rle_block(data, start, end, out) {
+        // The parser skips this block; its positions still enter the trees.
+        var q = start;
+        while q < end { bt_find(data, head, h3, tree, hbits, mask, q, 0, depth, nice, false, clen, coff); q += 1; }
+        return;
+    }
+    // Matches for every position, found once: the trees only grow forwards. Inside a match of
+    // nice length or more only insertions are made, as the parser jumps over it.
+    var cidx: i64[>..] = [];
+    var q = start;
+    var skip_to = start;
+    while q < end {
+        cidx.push(clen.len);
+        if q < skip_to {
+            bt_find(data, head, h3, tree, hbits, mask, q, 0, depth, nice, false, clen, coff);
+        } else {
+            let n = bt_find(data, head, h3, tree, hbits, mask, q, min(131072, end - q), depth, nice, true, clen, coff);
+            if n > 0 && clen[clen.len - 1] >= nice { skip_to = q + clen[clen.len - 1]; }
+        }
+        q += 1;
+    }
+    cidx.push(clen.len);
+    var pr: i64[377] = [0; 377];
+    var litc: i64[256] = [0; 256];
+    var llc: i64[36] = [0; 36];
+    var mlc: i64[53] = [0; 53];
+    var ofc: i64[32] = [0; 32];
+    for i in end - start { litc[data[start + i] as i64] += 1; }
+    default_counts(llc[0..36], mlc[0..53], ofc[0..32]);
+    set_prices(pr[0..377], litc[0..256], llc[0..36], mlc[0..53], ofc[0..32]);
+    var pass: i64 = 1;
+    while pass < passes {
+        stats_pass(data, start, end, cidx[0..cidx.len], clen[0..clen.len], coff[0..coff.len], pr[0..377], opt, nice, r, litc[0..256], llc[0..36], mlc[0..53], ofc[0..32]);
+        pass += 1;
+    }
+    var seqs: Seq[>..] = [];
+    var lits: u8[>..] = [];
+    var rr: i64[3] = [r[0], r[1], r[2]];
+    let lit_start = opt_parse(data, start, end, cidx[0..cidx.len], clen[0..clen.len], coff[0..coff.len], pr[0..377], opt, nice, rr[0..3], seqs, lits);
+    emit_block(data, start, end, seqs[0..seqs.len], lits, lit_start, rr[0..3], r, out);
+}
+
+// Levels 13..19: binary trees and optimal parsing; passes re-estimate the prices from the previous
+// parse of the same block.
+fn compress_opt(data: const u8[:], out: u8[>..]&, lv: i64) -> bool {
+    let passes: i64 = if lv <= 15 { 2 } else if lv <= 18 { 3 } else { 4 };
+    let nice: i64 = if lv == 13 { 32 } else if lv == 14 { 48 } else if lv == 15 { 64 } else if lv == 16 { 96 } else if lv == 17 { 128 } else if lv == 18 { 256 } else { 512 };
+    let depth: i64 = if lv == 13 { 16 } else if lv == 14 { 32 } else if lv == 15 { 64 } else if lv == 16 { 128 } else if lv == 17 { 256 } else if lv == 18 { 512 } else { 1024 };
+    let hb = highbit(data.len as i64) + 1;
+    let hbits = min(22, max(10, hb));
+    let blog = min(22, max(10, hb));
+    var head: u32[>..] = [];
+    head.resize(1 << hbits, 0);
+    var tree: u32[>..] = [];
+    tree.resize(2 << blog, 0);
+    var opt: i64[>..] = [];
+    opt.resize((OPT_NUM + 8) * 8, 0);
+    var h3: u32[>..] = [];
+    h3.resize(131072, 0);
+    let mask = (1 << blog) - 1;
+    put_le(out, 4247762216, 4);
+    out.push(0xE4);
+    put_le(out, data.len as i64, 8);
+    var reps: i64[3] = [1, 4, 8];
+    var start: i64 = 0;
+    if data.len == 0 {
+        put_le(out, 1 | (0 << 1) | (0 << 3), 3);
+    }
+    while start < data.len {
+        let end = min(data.len, start + BLOCK_MAX);
+        let block_at = out.len;
+        compress_block_opt(data, start, end, head[0..head.len], h3[0..h3.len], tree[0..tree.len], hbits, mask, depth, nice, passes, opt[0..opt.len], reps[0..3], out);
+        if end == data.len { out[block_at] = out[block_at] | 1; }
+        start = end;
+    }
+    let sum = xxh64(data[0..data.len]) & 4294967295;
+    put_le(out, sum as i64, 4);
+    return true;
+}
+
+// Compresses data as one zstd frame. Levels 1..3 use the double-fast search of compress(); 4..12 use
+// hash chains: 4 is greedy, 5..6 lazy, 7..12 lazy with two positions of lookahead and more candidates;
+// 13..19 use binary trees and optimal parsing. Levels outside 1..19 are clamped.
+fn compress_level(data: const u8[:], out: u8[>..]&, level: i64) -> bool {
+    let lv = min(19, max(1, level));
+    if lv <= 3 || data.len >= 4294967000 { return compress(data, out); }
+    if lv >= 13 { return compress_opt(data, out, lv); }
+    let depth = if lv == 4 { 0 } else if lv <= 6 { 1 } else { 2 };
+    let attempts: i64 = if lv == 4 { 6 } else if lv == 5 { 8 } else if lv == 6 { 16 } else if lv == 7 { 24 } else if lv == 8 { 48 } else if lv == 9 { 96 } else if lv == 10 { 192 } else if lv == 11 { 384 } else { 1024 };
+    let hb = highbit(data.len as i64) + 1;
+    let hbits = min(20, max(10, hb));
+    let clog = min(22, max(10, hb));
+    var head: u32[>..] = [];
+    head.resize(1 << hbits, 0);
+    var prev: u32[>..] = [];
+    prev.resize(1 << clog, 0);
+    let mask = (1 << clog) - 1;
+    put_le(out, 4247762216, 4);
+    out.push(0xE4);
+    put_le(out, data.len as i64, 8);
+    var reps: i64[3] = [1, 4, 8];
+    var start: i64 = 0;
+    if data.len == 0 {
+        put_le(out, 1 | (0 << 1) | (0 << 3), 3);
+    }
+    while start < data.len {
+        let end = min(data.len, start + BLOCK_MAX);
+        let block_at = out.len;
+        compress_block_chain(data, start, end, head[0..head.len], prev[0..prev.len], hbits, mask, depth, attempts, reps[0..3], out);
+        if end == data.len { out[block_at] = out[block_at] | 1; }
+        start = end;
+    }
+    let sum = xxh64(data[0..data.len]) & 4294967295;
+    put_le(out, sum as i64, 4);
+    return true;
+}
+
 // Compresses data as one zstd frame.
 fn compress(data: const u8[:], out: u8[>..]&) -> bool {
     // Tables of the size the input needs: a small input does not pay for the full ones.
     let hb = highbit(data.len as i64) + 1;
     let hbits = min(16, max(10, hb));
     let lbits = min(17, max(10, hb + 1));
-    var head: i32[>..] = [];
+    var head: u64[>..] = [];
     head.resize(1 << hbits, 0);
-    var longt: i32[>..] = [];
+    var longt: u64[>..] = [];
     longt.resize(1 << lbits, 0);
     return encode_frame(data, out, head[0..head.len], longt[0..longt.len], 1, 16 - hbits, 17 - lbits);
 }
-fn encode_frame(data: const u8[:], out: u8[>..]&, head: i32[:], longt: i32[:], base: i64, hshift: i64, lshift: i64) -> bool {
+fn encode_frame(data: const u8[:], out: u8[>..]&, head: u64[:], longt: u64[:], base: i64, hshift: i64, lshift: i64) -> bool {
     // Frame header: magic, Frame_Header_Descriptor (single segment, 8-byte content size,
     // content checksum), the content size.
     put_le(out, 4247762216, 4);
@@ -1708,7 +2311,7 @@ fn compress_with(ctx: EncCtx&, data: const u8[:], out: u8[>..]&) -> bool {
 
 // Encoder state kept between calls: hash tables of positions (stored with an offset, see
 // compress_with) and the offset of the next call.
-struct EncCtx { head: i32[65536], longt: i32[131072], base: i64 }
+struct EncCtx { head: u64[65536], longt: u64[131072], base: i64 }
 
 fn enc_new() -> EncCtx {
     return EncCtx { [0; 65536], [0; 131072], 1 };

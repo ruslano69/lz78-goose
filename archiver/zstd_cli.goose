@@ -2,7 +2,7 @@ import std;
 import os;
 import zstd;
 
-// Usage: gzstd c|d SOURCE TARGET   (c: compress to a zstd frame, d: decompress)
+// Usage: gzstd c SOURCE TARGET [LEVEL] | d SOURCE TARGET [MAX]   (c: compress to a zstd frame, level 1..19, default 3; d: decompress)
 fn main() {
     if arg_count() != 4 && arg_count() != 5 { write_stderr("usage: gzstd c|d SOURCE TARGET [MAX]\n"); exit(2); }
     var mode: u8[>..] = []; arg(1, mode);
@@ -12,7 +12,14 @@ fn main() {
     if !read_file(source, input) { write_stderr("cannot read input\n"); exit(1); }
     var output: u8[>..] = [];
     if mode == "c" {
-        if !zstd::compress(input, output) { write_stderr("zstd encode failed\n"); exit(1); }
+        var level: i64 = 3;
+        if arg_count() == 5 {
+            var text: u8[>..] = []; arg(4, text);
+            let value, ok = parse_int(text);
+            if !ok || value < 1 { write_stderr("LEVEL must be a positive number\n"); exit(2); }
+            level = value;
+        }
+        if !zstd::compress_level(input, output, level) { write_stderr("zstd encode failed\n"); exit(1); }
     } else if mode == "d" {
         var max: i64 = 4611686018427387904;
         if arg_count() == 5 {
