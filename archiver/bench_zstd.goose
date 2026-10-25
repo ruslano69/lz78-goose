@@ -2,11 +2,11 @@ import std;
 import os;
 import zstd;
 
-// c: fresh encoder tables; reuse: retained EncCtx; d: decoder.
+// c: fresh encoder tables (optional LEVEL 1..19, default 3); reuse: retained EncCtx; d: decoder.
 // Read/write and context creation are outside the timed region.
 fn main() {
     let av = args();
-    if av.len != 5 {
+    if av.len != 5 && av.len != 6 {
         write_stderr("usage: bench_zstd c|reuse|d INPUT ITERATIONS OUTPUT\n");
         exit(2);
     }
@@ -16,6 +16,12 @@ fn main() {
     }
     let n, ok = parse_int(av[3]);
     if !ok || n <= 0 { write_stderr("ITERATIONS must be positive\n"); exit(2); }
+    var level: i64 = 3;
+    if av.len == 6 {
+        let lv, lok = parse_int(av[5]);
+        if !lok || lv < 1 { write_stderr("LEVEL must be positive\n"); exit(2); }
+        level = lv;
+    }
     var input: u8[>..] = [];
     if !read_file(av[2], input) { write_stderr("cannot read INPUT\n"); exit(1); }
     var output: u8[>..] = [];
@@ -24,14 +30,14 @@ fn main() {
         output.clear();
         if mode == "d" { assert(zstd::decompress(input, output)); }
         else if mode == "reuse" { assert(zstd::compress_with(ctx, input, output)); }
-        else { assert(zstd::compress(input, output)); }
+        else { assert(zstd::compress_level(input, output, level)); }
     }
     let begin = clock();
     for i in n {
         output.clear();
         if mode == "d" { assert(zstd::decompress(input, output)); }
         else if mode == "reuse" { assert(zstd::compress_with(ctx, input, output)); }
-        else { assert(zstd::compress(input, output)); }
+        else { assert(zstd::compress_level(input, output, level)); }
     }
     let elapsed = clock() - begin;
     if !write_file_atomic(av[4], output) { write_stderr("cannot write OUTPUT\n"); exit(1); }

@@ -158,3 +158,26 @@ process runs, keep input bytes fixed, and report both throughput and size.
 The independent verification scripts and their build commands are listed
 in AGENTS.md. Downloaded references, binaries, profiler traces and local
 raw timing samples stay under ignored `build/`.
+
+## Levels 4-12: where the time goes, and a row finder that did not help (2026-10-25)
+
+Hash-chain levels (lazy parsing, 5-byte hash). Windows x64, MSVC 19.44, 1.3 MB source text,
+2 MB executable, 1 MiB word corpus; speeds are in-process medians from `bench_zstd_levels.py`.
+
+A sampling profile (a thread-suspending sampler over a `-g -fno-inline` gcc build, resolved with
+addr2line) put 93-98% of the time in the parse and under 3% in block writing. Inside the parse,
+57% was the chain walk, whose loads depend on one another (`data[cand + len]` 26%, `prev[cand]` 14%,
+`head[h]` 9%) and 12% was insertion. Trying all three repeat offsets at every probe cost 10-25%.
+Not helpful: stopping the walk at a nice length (no change), smaller hash or chain tables (no
+change), loading eight bytes before building slices (no change).
+
+Kept: the level table in `compress_level` (4 to 128 candidates, one repeat offset up to level 6),
+which matches libzstd's density per level. Level 12 on the word corpus went from 0.8 to 5.4 MB/s.
+
+Tried and dropped: replacing chains by rows of 16-128 slots, indexed by the 5-byte hash, each slot
+holding a 32-bit tag and the position (as libzstd's row finder, with a scalar scan instead of SIMD).
+Round trips were exact, but at the same candidate counts the output grew 1-2% (4% on the words,
+since a row mixes several strings) and speed fell by 10-30% on text and executables (level 6 text
+37 -> 33 MB/s, level 12 executable 15 -> 9.5 MB/s). The scan of 15-127 tags per probe costs more than
+the few chain hops it replaces. A SWAR tag compare over a separate byte array might change this;
+it was not tried.

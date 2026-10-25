@@ -1697,15 +1697,27 @@ fn chain_insert(data: const u8[:], head: u32[:], prev: u32[:], hbits: i64, mask:
     }
 }
 
+// match_at for a < p when the eight bytes at p are already loaded in word: a first difference inside
+// them is found without building slices.
+fn match_len_w(data: const u8[:], a: i64, p: i64, word: u64, limit: i64) -> i64 {
+    if limit >= 8 {
+        let diff = read64(data, a) ^ word;
+        if diff != 0 { return ctz(diff) / 8; }
+        return 8 + match_at(data, a + 8, p + 8, limit - 8);
+    }
+    return match_at(data, a, p, limit);
+}
+
 // Longest match for p along its hash chain, at most `attempts` candidates, none further back than the window.
 fn chain_search(data: const u8[:], head: u32[:], prev: u32[:], hbits: i64, mask: i64, p: i64, limit: i64, attempts: i64) -> Found {
     var best = Found { 0, -1, false };
     if p + 8 > data.len { return best; }
-    var cand = head[chain_hash(read64(data, p), hbits)] as i64 - 1;
+    let word = read64(data, p);
+    var cand = head[chain_hash(word, hbits)] as i64 - 1;
     var n: i64 = 0;
     while cand >= 0 && p - cand <= mask && n < attempts {
         if best.len == 0 || (best.len < limit && data[cand + best.len] == data[p + best.len]) {
-            let l = match_at(data, cand, p, limit);
+            let l = match_len_w(data, cand, p, word, limit);
             if l > best.len {
                 best.len = l;
                 best.pos = cand;
@@ -1731,15 +1743,16 @@ fn ov_for(off: i64, ll: i64, rr: i64[:]) -> i64 {
 }
 
 // Best of the repeat offsets and the hash chain for position p, which follows `ll` literals.
-fn find_at(data: const u8[:], head: u32[:], prev: u32[:], hbits: i64, mask: i64, p: i64, end: i64, ll: i64, rr: i64[:], attempts: i64) -> Found {
+fn find_at(data: const u8[:], head: u32[:], prev: u32[:], hbits: i64, mask: i64, p: i64, end: i64, ll: i64, rr: i64[:], attempts: i64, reps: i64) -> Found {
     let limit = min(131072, end - p);
     var best = chain_search(data, head, prev, hbits, mask, p, limit, attempts);
+    let word = if p + 8 <= data.len { read64(data, p) } else { 0 };
     if best.len < 5 { best.len = 0; best.pos = -1; }
     let roff: i64[3] = if ll > 0 { [rr[0], rr[1], rr[2]] } else { [rr[1], rr[2], rr[0] - 1] };
-    for k in 3 {
+    for k in reps {
         let o = roff[k];
         if o <= 0 || p - o < 0 { continue; }
-        let l = match_at(data, p - o, p, limit);
+        let l = match_len_w(data, p - o, p, word, limit);
         if l >= MIN_MATCH_ZSTD {
             let f = Found { l, p - o, true };
             if match_gain(f, p) >= match_gain(best, p) { best = f; }
@@ -1750,13 +1763,13 @@ fn find_at(data: const u8[:], head: u32[:], prev: u32[:], hbits: i64, mask: i64,
 
 // Parses data[start..end) into sequences. depth 0 is greedy; 1 and 2 look one or two positions
 // ahead for a better match. Returns the start of the trailing literals.
-fn parse_chain(data: const u8[:], start: i64, end: i64, head: u32[:], prev: u32[:], hbits: i64, mask: i64, depth: i64, attempts: i64, rr: i64[:], seqs: Seq[>..]&, lits: u8[>..]&) -> i64 {
+fn parse_chain(data: const u8[:], start: i64, end: i64, head: u32[:], prev: u32[:], hbits: i64, mask: i64, depth: i64, attempts: i64, reps: i64, rr: i64[:], seqs: Seq[>..]&, lits: u8[>..]&) -> i64 {
     var p = start;
     var anchor = start;
     var next = start;
     while p < end {
         if p > next { chain_insert(data, head, prev, hbits, mask, next, p); next = p; }
-        var m = find_at(data, head, prev, hbits, mask, p, end, p - anchor, rr, attempts);
+        var m = find_at(data, head, prev, hbits, mask, p, end, p - anchor, rr, attempts, reps);
         if m.len == 0 {
             p += 1 + ((p - anchor) >> 8);
             continue;
@@ -1766,13 +1779,13 @@ fn parse_chain(data: const u8[:], start: i64, end: i64, head: u32[:], prev: u32[
             var q = p + 1;
             if q < end {
                 if q > next { chain_insert(data, head, prev, hbits, mask, next, q); next = q; }
-                let m2 = find_at(data, head, prev, hbits, mask, q, end, q - anchor, rr, attempts);
+                let m2 = find_at(data, head, prev, hbits, mask, q, end, q - anchor, rr, attempts, reps);
                 if m2.len > 0 && match_gain(m2, q) > match_gain(m, p) + 4 { m = m2; p = q; improved = true; }
             }
             q = p + 2;
             if !improved && depth > 1 && q < end {
                 if q > next { chain_insert(data, head, prev, hbits, mask, next, q); next = q; }
-                let m2 = find_at(data, head, prev, hbits, mask, q, end, q - anchor, rr, attempts);
+                let m2 = find_at(data, head, prev, hbits, mask, q, end, q - anchor, rr, attempts, reps);
                 if m2.len > 0 && match_gain(m2, q) > match_gain(m, p) + 7 { m = m2; p = q; improved = true; }
             }
             if !improved { break; }
@@ -1794,7 +1807,7 @@ fn parse_chain(data: const u8[:], start: i64, end: i64, head: u32[:], prev: u32[
     return anchor;
 }
 
-fn compress_block_chain(data: const u8[:], start: i64, end: i64, head: u32[:], prev: u32[:], hbits: i64, mask: i64, depth: i64, attempts: i64, r: i64[:], out: u8[>..]&) {
+fn compress_block_chain(data: const u8[:], start: i64, end: i64, head: u32[:], prev: u32[:], hbits: i64, mask: i64, depth: i64, attempts: i64, reps: i64, r: i64[:], out: u8[>..]&) {
     if rle_block(data, start, end, out) {
         // The parser skips this block; its positions still enter the chains.
         chain_insert(data, head, prev, hbits, mask, start, end);
@@ -1803,7 +1816,7 @@ fn compress_block_chain(data: const u8[:], start: i64, end: i64, head: u32[:], p
     var seqs: Seq[>..] = [];
     var lits: u8[>..] = [];
     var rr: i64[3] = [r[0], r[1], r[2]];
-    let lit_start = parse_chain(data, start, end, head, prev, hbits, mask, depth, attempts, rr[0..3], seqs, lits);
+    let lit_start = parse_chain(data, start, end, head, prev, hbits, mask, depth, attempts, reps, rr[0..3], seqs, lits);
     emit_block(data, start, end, seqs[0..seqs.len], lits, lit_start, rr[0..3], r, out);
 }
 
@@ -2224,8 +2237,12 @@ fn compress_level(data: const u8[:], out: u8[>..]&, level: i64) -> bool {
     let lv = min(19, max(1, level));
     if lv <= 3 || data.len >= 4294967000 { return compress(data, out); }
     if lv >= 13 { return compress_opt(data, out, lv); }
-    let depth = if lv == 4 { 0 } else if lv <= 6 { 1 } else { 2 };
-    let attempts: i64 = if lv == 4 { 6 } else if lv == 5 { 8 } else if lv == 6 { 16 } else if lv == 7 { 24 } else if lv == 8 { 48 } else if lv == 9 { 96 } else if lv == 10 { 192 } else if lv == 11 { 384 } else { 1024 };
+    // Search effort per level: lookahead depth, candidates per position, and how many of the three repeat
+    // offsets are tried at each probe. Candidates are about the cost of a level, and each step up the
+    // table buys little density for its time.
+    let depth: i64 = if lv <= 5 { 0 } else if lv <= 7 { 1 } else { 2 };
+    let attempts: i64 = if lv == 4 { 4 } else if lv <= 6 { 8 } else if lv <= 8 { 16 } else if lv == 9 { 24 } else if lv == 10 { 48 } else if lv == 11 { 96 } else { 128 };
+    let nreps: i64 = if lv <= 6 { 1 } else { 3 };
     let hb = highbit(data.len as i64) + 1;
     let hbits = min(20, max(10, hb));
     let clog = min(22, max(10, hb));
@@ -2245,7 +2262,7 @@ fn compress_level(data: const u8[:], out: u8[>..]&, level: i64) -> bool {
     while start < data.len {
         let end = min(data.len, start + BLOCK_MAX);
         let block_at = out.len;
-        compress_block_chain(data, start, end, head[0..head.len], prev[0..prev.len], hbits, mask, depth, attempts, reps[0..3], out);
+        compress_block_chain(data, start, end, head[0..head.len], prev[0..prev.len], hbits, mask, depth, attempts, nreps, reps[0..3], out);
         if end == data.len { out[block_at] = out[block_at] | 1; }
         start = end;
     }
