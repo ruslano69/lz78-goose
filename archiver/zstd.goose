@@ -1536,7 +1536,7 @@ fn dfast_put(data: const u8[:], head: u32[:], longt: u32[:], base: i64, hshift: 
 // (8-byte hash) candidate, else a short (4-byte hash) candidate that a long one at the next byte may
 // replace; matches grow backwards over pending literals, and the second repeat offset is tried at once
 // after every match. Returns the start of the trailing literals.
-fn parse_dfast(data: const u8[:], start: i64, end: i64, head: u32[:], longt: u32[:], base: i64, hshift: i64, lshift: i64, rr: i64[:], seqs: Seq[>..]&, lits: u8[>..]&) -> i64 {
+fn parse_dfast(data: const u8[:], start: i64, end: i64, head: u32[:], longt: u32[:], base: i64, hshift: i64, lshift: i64, rr: i64[:], seqs: Seq[>..]&, lits: u8[>..]&, collect: bool) -> i64 {
     var p = start;
     var anchor = start;
     while p + 16 <= end {
@@ -1592,7 +1592,7 @@ fn parse_dfast(data: const u8[:], start: i64, end: i64, head: u32[:], longt: u32
         let ov = ov_for(s - pos, ll, rr);
         seqs.push(Seq { ll as! u32, len as! u32, ov as! u32 });
         rep_update(ov, ll, rr);
-        lits.append(data[anchor..s]);
+        if collect { lits.append(data[anchor..s]); }
         dfast_put(data, head, longt, base, hshift, lshift, p + 2);
         p = s + len;
         dfast_put(data, head, longt, base, hshift, lshift, p - 2);
@@ -1617,7 +1617,7 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: u32[:], longt: 
     var seqs: Seq[>..] = [];
     var lits: u8[>..] = [];
     var rr: i64[3] = [r[0], r[1], r[2]];
-    let lit_start = parse_dfast(data, start, end, head, longt, base, hshift, lshift, rr[0..3], seqs, lits);
+    let lit_start = parse_dfast(data, start, end, head, longt, base, hshift, lshift, rr[0..3], seqs, lits, true);
     emit_block(data, start, end, seqs[0..seqs.len], lits, lit_start, rr[0..3], r, out);
 }
 

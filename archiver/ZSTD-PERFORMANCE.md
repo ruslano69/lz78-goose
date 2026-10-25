@@ -181,3 +181,34 @@ since a row mixes several strings) and speed fell by 10-30% on text and executab
 37 -> 33 MB/s, level 12 executable 15 -> 9.5 MB/s). The scan of 15-127 tags per probe costs more than
 the few chain hops it replaces. A SWAR tag compare over a separate byte array might change this;
 it was not tried.
+
+## Two-thread pipeline at levels 1-3 (2026-10-25)
+
+`zstd_pipe.goose` (`compress_pipelined`) parses on the calling thread and entropy-codes on a worker: the
+worker gets the input once, rebuilds each block's literals from the sequences it receives, writes the
+blocks and the checksum, and returns the frame body. Goose workers share no memory, so every block crosses
+a queue by copy. The parse assumes every block is written compressed; when the worker writes one raw, the
+decoder's repeat-offset history stays behind the parse's, and the worker re-expresses the following
+sequences against its own history. The module is separate because a `thread_fn` anywhere in an imported
+module makes `goose run` (the in-process backend) refuse the program.
+
+Output is byte-identical to `compress_level` on the corpus (including a file with raw blocks interleaved);
+with raw blocks forced on every third block, single-thread and pipelined outputs both decode with libzstd
+and differ by a few bytes. Clang build, level 3, wall-clock MB/s, medians of 7 alternating runs, spawn
+and input copy included. libzstd 1.5.7 through Python, one thread (`nbWorkers` 0):
+
+| Input | ours 1 thread | ours 2 threads | libzstd 1 thread |
+|---|---:|---:|---:|
+| source text 1.3 MB | 156 | 143 | 206 |
+| executable 2 MB | 153 | 151 | 193 |
+| words 1 MB | 279 | 262 | 319 |
+| Python sources 4 MB | 200 | 203 | 263 |
+| DLL 3 MB | 136 | 144 | 173 |
+| mixed 14 MB | 161 | 170 | 208 |
+
+The pipeline pays only past a few MB and then by 2-6%, far under the parse-only ceiling (217 MB/s on the
+mixed input): a worker that only drains the messages already leaves the parsing thread at 193 MB/s
+(building the message, copying 14 MB of input and about 18 MB of sequences), and the working worker costs
+another 12% (memory traffic; both threads read their own copy of the input). Against libzstd's own
+multi-thread mode this would not be a fair comparison either way; none was made. The module is kept
+as an opt-in, not used by any other code.

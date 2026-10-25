@@ -1,8 +1,9 @@
 import std;
 import os;
 import zstd;
+import zstd_pipe;
 
-// c: fresh encoder tables (optional LEVEL 1..19, default 3); reuse: retained EncCtx; d: decoder.
+// c: fresh encoder tables (optional LEVEL 1..19, default 3); p: the same with two threads (levels 1..3); reuse: retained EncCtx; d: decoder.
 // Read/write and context creation are outside the timed region.
 fn main() {
     let av = args();
@@ -11,7 +12,7 @@ fn main() {
         exit(2);
     }
     let mode = av[1];
-    if mode != "c" && mode != "reuse" && mode != "d" {
+    if mode != "c" && mode != "p" && mode != "reuse" && mode != "d" {
         write_stderr("mode must be c, reuse or d\n"); exit(2);
     }
     let n, ok = parse_int(av[3]);
@@ -30,6 +31,7 @@ fn main() {
         output.clear();
         if mode == "d" { assert(zstd::decompress(input, output)); }
         else if mode == "reuse" { assert(zstd::compress_with(ctx, input, output)); }
+        else if mode == "p" { assert(zstd_pipe::compress_pipelined(input, output, level)); }
         else { assert(zstd::compress_level(input, output, level)); }
     }
     let begin = clock();
@@ -37,6 +39,7 @@ fn main() {
         output.clear();
         if mode == "d" { assert(zstd::decompress(input, output)); }
         else if mode == "reuse" { assert(zstd::compress_with(ctx, input, output)); }
+        else if mode == "p" { assert(zstd_pipe::compress_pipelined(input, output, level)); }
         else { assert(zstd::compress_level(input, output, level)); }
     }
     let elapsed = clock() - begin;
