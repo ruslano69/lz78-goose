@@ -36,6 +36,11 @@ def corpus():
         "uniform_word_tail": b"\x80" * 135,
         "uniform_crossblock": b"\xff" * 262145,
         "rle_then_words": bytes(131072) + b"alpha beta gamma delta " * 8000 + b"\xff" * 131072,
+        "match_word_edges": b"".join(
+            bytes(range(32)) + bytes(range(k)) + b"\xff" + bytes(range(k, 32))
+            for k in range(17)
+        ) * 70,
+        "match_block_tails": b"abcdefgh" * 16384 + b"abcdefgX" + b"abcdefgh" * 16384 + b"abc",
         "words": b"".join(rng.choice([b"alpha", b"beta", b"gamma", b" ", b"\n"]) for _ in range(40000)),
     }
     text = b"".join((ARCHIVER / name).read_bytes() for name in ["zstd.goose", "sevenzip.goose", "gsbzip2.goose"])

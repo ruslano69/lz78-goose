@@ -66,7 +66,7 @@
   block/whole-file CRC and exact EOF before accepting an archive. CRC is not authentication.
 - Store raw blocks when the complete compressed payload is not smaller.
 - ZSTD uniform blocks use the standard RLE block type (one stored byte); raw and RLE blocks leave repeat-offset history unchanged. Emit blocks directly into the frame output to avoid a second full-block copy.
-- ZSTD long/short search hashes share one loaded word. Sequence writing reuses the LL/ML/OF code arrays prepared for FSE table selection; keep the encoded bitstream unchanged when optimizing this path.
+- ZSTD repeat checks, long/short hashes and table-candidate checks share one loaded current-position word. Keep the candidate's cheap first-byte rejection and use byte fallback when fewer than eight block bytes remain. Sequence writing reuses the LL/ML/OF code arrays prepared for FSE table selection; keep the encoded bitstream unchanged when optimizing this path.
 - Newly normalized ZSTD sequence tables use tableLog 8 (256 states); the predefined tables retain their standard logs. Changing normalization can change compressed bytes without changing decoded data.
 - Fixed tables own MTF/Huffman state. Dynamic scratch lives within one block call;
   do not retain views across arena growth. No Unicode transformation or C helper code.

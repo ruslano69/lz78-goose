@@ -1480,6 +1480,10 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: 
         var best_ov: i64 = 0;
         let ll = p - lit_start;
         let limit = min(131072, end - p);
+        // One current-position word serves repeat checks, both hashes and
+        // the table candidates. Keep the byte rejection before word loads.
+        let have_word = p + 8 <= data.len;
+        let word = if have_word { read64(data, p) } else { 0 };
         // Repeat-offset candidates that the coding can express at this literal length.
         var roff: i64[3] = [rr[1], rr[2], rr[0] - 1];
         if ll > 0 {
@@ -1493,18 +1497,23 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: 
             if o <= 0 || p - o < 0 { continue; }
             // A candidate can only win if it matches at best_len (for ties the repeat code wins).
             if best_len > 0 && (best_len >= limit || data[p - o + best_len] != data[p + best_len]) { continue; }
-            let l = match_at(data, p - o, p, limit);
+            let l = if limit >= 8 && have_word {
+                if data[p - o] != (word as! u8) { 0 } else {
+                    let diff = read64(data, p - o) ^ word;
+                    if diff != 0 { ctz(diff) / 8 }
+                    else { 8 + match_at(data, p - o + 8, p + 8, limit - 8) }
+                }
+            } else { match_at(data, p - o, p, limit) };
             if l >= MIN_MATCH_ZSTD && l >= best_len {
                 best_len = l;
                 best_pos = p - o;
                 best_ov = k + 1;
             }
         }
-        if p + 8 <= data.len {
+        if have_word {
             // Two tables, no chains: the long table hashes 8 bytes, the short one 4.
             // Both hashes use the same input word. Keep its low 32 bits
             // for the short hash instead of loading the first bytes again.
-            let word = read64(data, p);
             let hl = (((word * 11400714819323198485) >> 47) as i64) >> lshift;
             let hs = ((((word as! u32) * 2654435761) >> (32 - HASH_BITS_ZSTD)) as i64) >> hshift;
             let cl = longt[hl] as i64 - base;
@@ -1512,7 +1521,15 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: 
             longt[hl] = (p + base) as i32;
             head[hs] = (p + base) as i32;
             if cl >= 0 && cl < p {
-                let l = match_at(data, cl, p, limit);
+                // The current word is already loaded for hashing. Reuse it
+                // to resolve short prefixes, or start after eight equal bytes.
+                let l = if limit >= 8 {
+                    if data[cl] != (word as! u8) { 0 } else {
+                        let diff = read64(data, cl) ^ word;
+                        if diff != 0 { ctz(diff) / 8 }
+                        else { 8 + match_at(data, cl + 8, p + 8, limit - 8) }
+                    }
+                } else { match_at(data, cl, p, limit) };
                 if l >= MIN_MATCH_ZSTD && l > best_len {
                     best_len = l;
                     best_pos = cl;
@@ -1521,7 +1538,15 @@ fn compress_block(data: const u8[:], start: i64, end: i64, head: i32[:], longt: 
             }
             // The short table is consulted only when neither the long table nor a repeat matched.
             if best_len == 0 && cs >= 0 && cs < p && cs != cl {
-                let l = match_at(data, cs, p, limit);
+                // The current word is already loaded for hashing. Reuse it
+                // to resolve short prefixes, or start after eight equal bytes.
+                let l = if limit >= 8 {
+                    if data[cs] != (word as! u8) { 0 } else {
+                        let diff = read64(data, cs) ^ word;
+                        if diff != 0 { ctz(diff) / 8 }
+                        else { 8 + match_at(data, cs + 8, p + 8, limit - 8) }
+                    }
+                } else { match_at(data, cs, p, limit) };
                 if l >= MIN_MATCH_ZSTD && l > best_len {
                     best_len = l;
                     best_pos = cs;

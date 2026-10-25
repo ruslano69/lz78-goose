@@ -45,8 +45,9 @@ claim of superiority.
 Before increasing FSE precision, the first row occupied 138834 bytes at
 431.8 MB/s. The larger tables reduced its size by 5.59% while retaining
 throughput. The other word cases changed speed by -1.08% to +0.72%.
-The 256-word case still encodes more slowly than Go but produces a
-smaller stream. These generated words are not a natural-language corpus.
+These initial measurements predate the match-probe follow-up below. The
+256-word case was slower than Go at that point but produced a smaller
+stream. These generated words are not a natural-language corpus.
 
 A separate three-batch screening of larger FSE tables found similar GCC
 throughput on sources, random bytes, zeros and executable bytes. Source
@@ -60,6 +61,69 @@ MSVC-specific zero-input regression remains: the final screening measured
 about 0.358 versus 0.347 seconds per 1000 encodes relative to the version
 before the shared-hash/code-reuse work. Earlier runs showed a larger gap.
 Treat compiler/backend effects separately from algorithmic improvements.
+
+## Match-probe follow-up: 256-word vocabulary
+
+Baseline: repository revision `5ee008b`, including tableLog 8. The same
+current-position u64 now serves the repeat-offset checks, both hashes and
+both table-candidate checks. A nonzero XOR identifies the first differing
+byte; equal words let the remaining comparison start eight bytes later.
+Candidate first-byte rejection is retained. A block tail shorter than
+eight bytes keeps the original byte comparison even if another block's
+bytes follow in the input. Match choices and compressed bytes are unchanged.
+
+The original 256-word input is 131072 choices from `word000 ` through
+`word255 ` using Python `random.Random(7).choice`, giving 1 MiB. SHA-256:
+`eb85cbb79bbdb7ab4bf513f9a3e8ae398416215876b5ae79d24e3912868ceb69`.
+Two additional 1 MiB inputs use `random.Random(seed).choices` over the
+same vocabulary with seeds 42 and 99.
+
+Seven rotating batches of 250 encodes, three warmups per process, reused
+state/output, checksum enabled, concurrency 1, median decimal MB/s. Same
+compiler/reference versions as above. File IO/startup are excluded, and
+no tests, builds or profiling ran concurrently with timing.
+
+| Input | Before / GCC | After / GCC | Go | Goose bytes | Go bytes |
+|---|---:|---:|---:|---:|---:|
+| Original 256 words | 260.7 | 291.2 | 283.9 | 220915 | 236740 |
+| 256 words, seed 42 | 260.6 | 290.4 | 284.3 | 220977 | 236739 |
+| 256 words, seed 99 | 260.4 | 288.8 | 284.1 | 221182 | 236574 |
+
+This meets the parity target on these screening cases: throughput rises
+about 11% while the output stays byte-identical and 6.5–6.7% smaller than
+Go's. This is not a general natural-language performance claim.
+
+A three-batch broader screen (200 encodes/batch) also retained identical
+bytes on both C backends:
+
+| Input | Before / GCC | After / GCC | Before / MSVC | After / MSVC |
+|---|---:|---:|---:|---:|
+| 256 words | 261 | 289 | 208 | 239 |
+| Sources | 1472 | 1552 | 925 | 951 |
+| Five-word corpus | 426 | 432 | 336 | 338 |
+| Random | 3291 | 3434 | 2340 | 2398 |
+| Zeros | 8021 | 8002 | 2921 | 2921 |
+| Executable | 395 | 437 | 346 | 381 |
+
+The roughly 0.2% zero-input difference is within normal variation; no
+material regression was observed in this screen. MSVC still trails Go
+on the large-word corpus. A variant without first-byte rejection reached
+about 303 MB/s with GCC but regressed two MSVC cases by 2–3%, so it was
+not kept. Removing the per-position length clamp did not improve speed
+and was reverted.
+
+The before-profile attributed 45.6% of 9646 leaf-symbol samples to
+compress_block, 12.0% to match_at, 22.8% to encode_sequences and 10.6%
+to the bit writer. Inlined work belongs to the containing function.
+The final profile collected 8007 samples: compress_block 48.4%, match_at
+4.2%, encode_sequences 26.3% and the bit writer 10.8%. These are leaf-symbol
+percentages, not absolute function timings or call counts. Sampling runtimes
+are separate from throughput measurements.
+
+Local raw samples and hashes are in ignored `build/zstd-bench/`:
+`v256-final-results.json`, `v256-broad-final.json` and the before/after
+profiles. The retained source changes use no C helper or unchecked memory
+access.
 
 ## Repeating a Goose measurement
 
@@ -80,12 +144,16 @@ process runs, keep input bytes fixed, and report both throughput and size.
 
 - `zstd_test.goose --debug`: 138336 prefix comparisons, mismatch bit
   positions, overlapping ranges and 4352 short RLE round trips.
-- klauspost master: 70 checks in each of Release and Debug; both DecodeAll
+- klauspost master: 80 checks in each of Release and Debug; both DecodeAll
   and its streaming reader check Goose output, and Goose reads all four
   Go encoder levels.
-- Official libzstd 1.5.7: 83 checks in each mode, including malformed
+- Official libzstd 1.5.7: 95 checks in each mode, including malformed
   frames and caller output limits.
 - Native 7z writer/reader tests pass in both modes.
+- The match-probe follow-up additionally cross-checked 217 short,
+  unaligned, mismatch and block-tail inputs against the pre-change encoder
+  byte-for-byte and independently decoded them with Go. The verifier corpus
+  includes durable word-prefix and multi-block tail cases.
 
 The independent verification scripts and their build commands are listed
 in AGENTS.md. Downloaded references, binaries, profiler traces and local
