@@ -5,6 +5,10 @@ Detailed sampling of the current level-3 parser on ordinary prose is in
 50–55% of parser samples; short-candidate/lookahead work is another 16–20%.
 These are operation-cluster sample shares, not libzstd-relative function timings.
 
+The subsequent memory-layout and nonlocal-return experiments, including the
+retained Huffman decoder reservoir (+16–17% on EXE/DLL with GCC 15.2), are
+in [ZSTD-MEMORY-2026-10-26.md](ZSTD-MEMORY-2026-10-26.md).
+
 The encoder uses a double-fast search, standard Zstd blocks, and a content
 checksum. These observations describe synthetic screening inputs, not a
 general claim that Goose is faster than another language or codec.

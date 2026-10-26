@@ -317,13 +317,44 @@ fn huf_header(src: const u8[:], h: Huf&) -> i64 {
 }
 
 // Decodes `count` symbols from a Huffman stream, read backwards.
-fn huf_stream(src: const u8[:], h: Huf, count: i64, out: u8[>..]&) -> bool {
+fn huf_stream(src: const u8[:], h: const Huf&, count: i64, out: u8[>..]&) -> bool {
     if src.len < 1 || src[src.len - 1] == 0 { return false; }
+    if h.acc < 1 || h.acc > 11 { return false; }
     var r = bwd_init(src);
+    if src.len < 8 {
+        for i in count {
+            let idx = bwd_peek(src, r, h.acc);
+            let nb = h.nb[idx] as i64;
+            if nb == 0 { return false; }
+            r.pos -= nb;
+            out.push(h.sym[idx]);
+        }
+        return r.pos >= 0;
+    }
+    // Reuse the loaded word until fewer than acc bits remain. The last word
+    // stays at byte zero; low bits beyond the stream are virtual zero padding.
+    let acc = h.acc;
+    let mask = (1 << acc) - 1;
+    var at = src.len - 8;
+    var window = read64(src, at);
+    var available = r.pos - 8 * at;
     for i in count {
-        let idx = bwd_peek(src, r, h.acc);
+        if available < acc {
+            if r.pos < 0 { return false; }
+            if at > 0 {
+                at = max(0, ((r.pos + 7) >> 3) - 8);
+                window = read64(src, at);
+                available = r.pos - 8 * at;
+            }
+        }
+        let idx = if available >= acc {
+            ((window >> (available - acc)) as! i64) & mask
+        } else {
+            ((window & (((1 as u64) << available) - 1)) << (acc - available)) as! i64
+        };
         let nb = h.nb[idx] as i64;
         if nb == 0 { return false; }
+        available -= nb;
         r.pos -= nb;
         out.push(h.sym[idx]);
     }
