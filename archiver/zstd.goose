@@ -528,16 +528,22 @@ fn sequences(blk: const u8[:], lits: const u8[:], out: u8[>..]&, frame_start: i6
     var st_of = bwd_read(stream, r, ctx.of.acc);
     var st_ml = bwd_read(stream, r, ctx.ml.acc);
     var lp: i64 = 0;
+    // Per-block decoded entries avoid dependent symbol-to-base/bit lookups.
+    // These fixed arrays use 12 KiB of temporary native-stack storage.
+    var ll_fast: u64[512] = [0; 512];
+    var ml_fast: u64[512] = [0; 512];
+    var of_fast: u64[512] = [0; 512];
+    if !seq_decode_entries(ctx.ll, 0, ll_fast) || !seq_decode_entries(ctx.ml, 2, ml_fast) || !seq_decode_entries(ctx.of, 1, of_fast) { return false; }
     for i in nbseq {
-        let ofc = ctx.of.sym[st_of] as i64;
-        let mlc = ctx.ml.sym[st_ml] as i64;
-        let llc = ctx.ll.sym[st_ll] as i64;
-        if ofc > 31 || mlc > 52 || llc > 35 { return false; }
+        let ofe = of_fast[st_of];
+        let mle = ml_fast[st_ml];
+        let lle = ll_fast[st_ll];
+        let ofc = (ofe >> 56) as i64;
         // The six reads of a sequence come from two windows of eight bytes: the offset and
         // match extra bits (at most 47), then the literal extra bits and the three state
         // updates (at most 43). The first value read is the highest field of its window.
-        let mlb = ML_BITS[mlc];
-        let llb = LL_BITS[llc];
+        let mlb = (mle >> 56) as i64;
+        let llb = (lle >> 56) as i64;
         var of_x: i64 = 0;
         var ml_x: i64 = 0;
         let loa = r.pos - (ofc + mlb);
@@ -555,9 +561,9 @@ fn sequences(blk: const u8[:], lits: const u8[:], out: u8[>..]&, frame_start: i6
         var nbm: i64 = 0;
         var nbo: i64 = 0;
         if more {
-            nbl = ctx.ll.nb[st_ll] as i64;
-            nbm = ctx.ml.nb[st_ml] as i64;
-            nbo = ctx.of.nb[st_of] as i64;
+            nbl = ((lle >> 48) & 255) as i64;
+            nbm = ((mle >> 48) & 255) as i64;
+            nbo = ((ofe >> 48) & 255) as i64;
         }
         var ll_x: i64 = 0;
         var s_ll: i64 = 0;
@@ -577,13 +583,13 @@ fn sequences(blk: const u8[:], lits: const u8[:], out: u8[>..]&, frame_start: i6
             s_ml = bwd_read(stream, r, nbm);
             s_of = bwd_read(stream, r, nbo);
         }
-        let off_val = (1 << ofc) + of_x;
-        let ml = ML_BASE[mlc] + ml_x;
-        let ll = LL_BASE[llc] + ll_x;
+        let off_val = ((ofe & 4294967295) as i64) + of_x;
+        let ml = ((mle & 4294967295) as i64) + ml_x;
+        let ll = ((lle & 4294967295) as i64) + ll_x;
         if more {
-            st_ll = (ctx.ll.base[st_ll] as i64) + s_ll;
-            st_ml = (ctx.ml.base[st_ml] as i64) + s_ml;
-            st_of = (ctx.of.base[st_of] as i64) + s_of;
+            st_ll = (((lle >> 32) & 65535) as i64) + s_ll;
+            st_ml = (((mle >> 32) & 65535) as i64) + s_ml;
+            st_of = (((ofe >> 32) & 65535) as i64) + s_of;
         }
         if r.pos < 0 { return false; }
         // Literals first, then the match from the window (RFC 8878 3.1.1.3.2.2).
@@ -631,6 +637,28 @@ fn sequences(blk: const u8[:], lits: const u8[:], out: u8[>..]&, frame_start: i6
     if lp < lits.len {
         if out.len + (lits.len - lp) > cap_end { return false; }
         out.append(lits[lp..lits.len]);
+    }
+    return true;
+}
+
+fn seq_decode_entries(t: const Fse&, which: i64, dst: u64[:]) -> bool {
+    // low32: decoded value base; next16: next-state base; next8: state bits;
+    // high8: value bits. Each hot lookup supplies all four fields.
+    for i in 1 << t.acc {
+        let code = t.sym[i] as i64;
+        var value: i64 = 0;
+        var bits: i64 = 0;
+        if which == 0 {
+            if code > 35 { return false; }
+            value = LL_BASE[code]; bits = LL_BITS[code];
+        } else if which == 1 {
+            if code > 31 { return false; }
+            value = 1 << code; bits = code;
+        } else {
+            if code > 52 { return false; }
+            value = ML_BASE[code]; bits = ML_BITS[code];
+        }
+        dst[i] = (value as u64) | ((t.base[i] as u64) << 32) | ((t.nb[i] as u64) << 48) | ((bits as u64) << 56);
     }
     return true;
 }

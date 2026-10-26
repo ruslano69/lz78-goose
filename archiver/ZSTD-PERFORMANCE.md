@@ -8,6 +8,8 @@ These are operation-cluster sample shares, not libzstd-relative function timings
 The subsequent memory-layout and nonlocal-return experiments, including the
 retained Huffman decoder reservoir (+16–17% on EXE/DLL with GCC 15.2), are
 in [ZSTD-MEMORY-2026-10-26.md](ZSTD-MEMORY-2026-10-26.md).
+The decoder follow-up and modest additional gains from decoded FSE entries
+are in [ZSTD-DECODER-2026-10-26.md](ZSTD-DECODER-2026-10-26.md).
 
 The encoder uses a double-fast search, standard Zstd blocks, and a content
 checksum. These observations describe synthetic screening inputs, not a
