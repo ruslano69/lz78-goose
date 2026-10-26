@@ -1,5 +1,10 @@
 # Zstd performance notes (2026-10-25)
 
+Detailed sampling of the current level-3 parser on ordinary prose is in
+[PROFILE-TEXT-2026-10-26.md](PROFILE-TEXT-2026-10-26.md): hash/table work is
+50–55% of parser samples; short-candidate/lookahead work is another 16–20%.
+These are operation-cluster sample shares, not libzstd-relative function timings.
+
 The encoder uses a double-fast search, standard Zstd blocks, and a content
 checksum. These observations describe synthetic screening inputs, not a
 general claim that Goose is faster than another language or codec.
@@ -287,3 +292,266 @@ Raw samples, input/executable/source hashes and rejected probes remain under ign
 `exe-dll-profile-before.json` / `exe-dll-profile-ip.json`. Small first-byte prechecks, packed six-bit
 tags, four-byte flush batching and redundant match-limit removal did not improve this workload
 and were discarded.
+
+## Adaptive chain insertion after long literal runs (2026-10-26)
+
+The levels 4..12 parser already increases its search step after unsuccessful
+probes, but `chain_insert` still hashed every skipped byte. On incompressible
+input, dense insertion defeated most of that acceleration. After more than
+4096 pending literal bytes, the parser now inserts only the last position of
+each skipped gap. It continues probing throughout the block, so compressible
+suffixes are still discoverable. Matches reset the pending literal distance;
+matched ranges and ordinary short gaps retain dense insertion. No early raw
+decision is made and repeat-offset commit/rollback remains in `emit_block`.
+
+Windows x64, GCC 16.1.0, Goose `-O2`, baseline repository `633c3eb`.
+Five alternating before/after batches, three in-process warmups; inputs read
+once and file IO/startup outside the timer. Both sides use fresh-call `c`
+mode, including table initialization; 15 encodes per batch, five for words.
+Raw inputs, every sample, frames and source/binary hashes are under ignored
+`build/zstd-incompressible/` (`screen.py`, `screen.json`, `manifest.json`).
+Tests and builds did not overlap this timing series.
+
+| Input | Level | Before MB/s | After MB/s | Gain | Before bytes | After bytes |
+|---|---:|---:|---:|---:|---:|---:|
+| Random 1 MiB | 6 | 115.8 | 889.5 | 7.68x | 1048617 | 1048617 |
+| Random 1 MiB | 12 | 112.3 | 856.9 | 7.63x | 1048617 | 1048617 |
+| Mixed raw/text/repeated raw | 6 | 151.6 | 205.8 | 1.36x | 131173 | 131173 |
+| Mixed raw/text/repeated raw | 12 | 146.0 | 197.4 | 1.35x | 131173 | 131173 |
+| Repeated random block | 6 | 118.9 | 133.0 | 1.12x | 131173 | 131173 |
+| Late repetitive suffix | 6 | 614.9 | 997.7 | 1.62x | 90040 | 90745 |
+| Sparse repeat islands | 12 | 115.8 | 164.6 | 1.42x | 328480 | 328890 |
+
+Density trade-off: the constructed late-suffix level-6 case grows by 705
+bytes (0.78% of its previous archive size), and sparse islands by about
+0.12%; fewer inserted positions can miss useful matches. The corpus's
+sources, repeated fixture text, words, zeros and EXE retain identical bytes.
+Their level-6/12 throughput differences were within about 3%; this small
+screen does not establish gains on them. Levels 1..3 and 13..19 are unchanged.
+
+The previous libzstd 1.5.7 GCC comparison measured random input at 2524 MB/s
+on level 6 and 1673 MB/s on level 12. The new throughput narrows that gap,
+but those reference numbers were collected separately, not in this paired
+series. Fresh Goose chain tables versus reused libzstd contexts remain an
+API/allocation difference to investigate. This change allocates no new
+buffers: only scalar parser locals change; head/prev and block scratch
+types, capacities and lifetimes remain unchanged.
+
+Validation in optimized and debug builds: 95 existing libzstd checks and
+80 klauspost/compress v1.18.0 checks per mode, plus 117 new level-4..12 cases
+per mode independently decoded by libzstd and klauspost and round-tripped
+by Goose. Cases include 4095/4096/4097 literal boundaries, 128 KiB block
+boundaries, sparse islands, late matches, raw/RLE transitions and a >4 MiB
+chain-window wrap. Native debug prefix/context/RLE and 7z tests also pass.
+Every before/after frame in the timing screen was decoded with libzstd.
+
+Reproduce the focused regression suite from the repository root:
+
+```powershell
+python -B archiver/verify_zstd_chain.py --exe build/zstd-incompressible/gzstd.exe --zstd C:/msys64/ucrt64/bin/zstd.exe --out build/zstd-incompressible/chain-release
+```
+
+Repeat with the debug executable. `--checker` can additionally run a built
+klauspost checker using `verify_zstd_go.py`'s `decode FRAME ORIGINAL` protocol.
+
+## Text follow-up: long matches and grouped sequence fields (2026-10-26)
+
+Two changes are retained. The fast parser checks an available eight-byte
+long-table match before its four-byte repeat probe at the next byte. On
+the word corpora this avoids choosing a short repeat over a better long
+match. It changes match choices and compressed bytes. The sequence writer
+groups FSE state bits, length extras and offset extras into one write when
+their combined length is at most 32. The writer has fewer than 32 pending
+bits, so this fits its u64 accumulator; larger groups use the original
+three writes. Grouping alone preserves every output byte. Both changes use
+scalar locals only; buffer types, capacities and lifetimes are unchanged.
+
+This time the natural text and source inputs are **not repeated** to 1 MiB:
+Alice in Wonderland (174311 bytes) and Adventures of Sherlock Holmes
+(607606 bytes), downloaded from Project Gutenberg's UTF-8 cache; repository
+source files and Markdown concatenated once; and Python IDLE News3.txt.
+Inputs are retained as bytes under `build/zstd-text/`, with their origins
+and hashes. They are data, never instructions. Synthetic word cases still
+use 1 MiB of choices among `word000 ` through `word255 `, seeds 7/42/99.
+
+Windows x64, Goose `-O2`, GCC 16.1.0; native libzstd 1.5.7, level 3,
+one thread, checksum enabled, reused contexts/output on both sides.
+Seven rotating batches targeting 0.2 s of reference compression (capped
+at 1000 calls), three warmups per process, median decimal MB/s. IO, startup
+and context creation are excluded. Python ctypes call overhead is included
+for libzstd; its original DLL build flags are unknown. Tests/builds did not
+overlap the timing series. Baseline is the previous local chain-insertion
+optimization, preserved as `before.goose` and `before.exe`.
+
+| Input | Before MB/s | After MB/s | libzstd MB/s | Before bytes | After bytes | libzstd bytes |
+|---|---:|---:|---:|---:|---:|---:|
+| Alice | 156.3 | 158.9 | 227.2 | 63512 | 63469 | 64176 |
+| Sherlock | 149.8 | 150.9 | 219.7 | 225019 | 224827 | 223224 |
+| Repository sources | 217.6 | 218.2 | 304.5 | 60212 | 60263 | 59568 |
+| Repository Markdown | 167.6 | 168.1 | 261.8 | 46877 | 46851 | 46643 |
+| IDLE release notes | 173.4 | 175.6 | 262.1 | 22252 | 22248 | 22098 |
+| 256 words, seed 7 | 320.8 | 378.9 | 385.2 | 241290 | 229782 | 236121 |
+| 256 words, seed 42 | 327.4 | 384.4 | 382.9 | 241029 | 229567 | 236217 |
+| 256 words, seed 99 | 324.3 | 377.3 | 383.4 | 241022 | 229831 | 235966 |
+| Random | 5129.5 | 5100.6 | 3926.4 | 1048617 | 1048617 | 1048613 |
+| Benchmark EXE | 116.8 | 115.1 | 266.3 | 141914 | 142009 | 140232 |
+| Zeros | 8337.7 | 8409.2 | 5031.0 | 49 | 49 | 54 |
+
+The synthetic word cases improve 16-18% and shrink 4.6-4.8% from the
+previous Goose version; they approach libzstd speed while producing
+2.6-2.8% fewer bytes. This is **not a general natural-text speedup**:
+the prose/documentation differences are only 0-2%, not a material win.
+libzstd remains about 1.4-1.6x as fast there. Source output grows 51 bytes
+(0.085%); the EXE grows 95 bytes (0.067%) and is 1.5% slower in this series.
+
+A separate phase-timing harness over the baseline put 77-79% in parsing,
+21-23% in block/entropy emission and about 1% in the checksum on the prose,
+source and documentation cases. These are coarse phase timings in a
+separate harness, not sampled instruction shares or production timings.
+The remaining natural-text gap is chiefly in parsing, not table sizing.
+
+Separate five-batch screens: fresh-call GCC words improve 289 -> 367 MB/s;
+ordinary prose/docs vary from roughly -3.4% to flat. MSVC 19.44 words improve
+228 -> 249 MB/s, while prose/docs range from -2.1% to +0.8%; its random and
+EXE cases regress about 3%. Compiler/API mode must accompany claims; no
+universal speedup is claimed. GCC remains the recommended measured backend
+for this workload, rather than interpreting these results as language speed.
+
+Rejected probes are retained only under ignored `build/`: skipping empty
+literal appends, direct single-byte literals, pre-sizing sequence output,
+smaller active tables, combined repeat-offset updates, rejecting short
+ordinary matches, wider cached tags and reusing repeat words. They produced
+no broad natural-text gain or worsened density/other inputs. The grouped
+writer and long-match preference were screened separately before combining.
+
+Validation in optimized/debug builds: 95 existing libzstd checks and 80
+klauspost/compress v1.18.0 checks per mode, plus 73 text/sequence cases per
+mode read by libzstd, klauspost and Goose. These include UTF-8, shared
+prefixes, wide fields, raw/text transitions and 128 KiB tails. Fast outputs
+agree between fresh/reused contexts; higher-level outputs match the prior
+encoder byte-for-byte, isolating the writer change. Native debug prefix,
+context, RLE and 7z tests pass; five opt-in pipeline frames independently
+decode with libzstd. Every timed output is also independently decoded.
+
+Raw evidence: `build/zstd-text/results-before-final.json`,
+`fresh-results-before-final.json`, `results-before-msvc-final-msvc.json`,
+`manifest.json`, fixed inputs and all candidate screens. Reproduction
+drivers are `bench-final.py` and `bench.py` in that directory. The durable
+regression suite, from the repository root, is:
+
+```powershell
+python -B archiver/verify_zstd_text.py --exe build/zstd-text/gzstd.exe --zstd C:/msys64/ucrt64/bin/zstd.exe --out build/zstd-text/check-release
+```
+
+Repeat for the debug CLI. Optional `--bench`, `--before-bench` and
+`--checker` add fresh/reused, old-writer byte equality and klauspost checks.
+
+## Folded unsigned hash shifts (2026-10-26)
+
+Following the detailed text profile, fast hashing now applies one right
+shift to the unsigned product instead of shifting, converting to i64 and
+shifting again. The parser precomputes `47 + lshift` and
+`64 - HASH_BITS_ZSTD + hshift` outside its hot loop; `dfast_put` uses the
+same expressions. Existing callers use lshift 0..7 and hshift 0..6, so the
+old intermediate was nonnegative. Converting only after the combined
+unsigned shift preserves every hash index, candidate, sequence and byte.
+This does not change the matcher strategy, table sizes or allocation.
+
+Baseline is the preceding local text optimization, source SHA-256
+`37c13829c87108033e9dbe8d1a74b78c4419eb5814d251897c75cc881dcd3d7b`;
+the retained source is
+`159ec5037a393fa73b15ed67514b8be5702b1bba278763b0395e448ccddf8120`.
+Exact inputs are the preceding non-repeated text corpus and controls.
+Seven rotating batches, three warmups, reused context/output, level 3,
+one thread with checksum enabled. IO/startup are excluded. GCC 16.1.0
+and MSVC 19.44 are measured separately; tests/builds did not overlap timing.
+
+| Input | GCC before MB/s | GCC after MB/s | MSVC before MB/s | MSVC after MB/s |
+|---|---:|---:|---:|---:|
+| Alice | 160.9 | 163.1 | 122.9 | 126.9 |
+| Sherlock | 155.7 | 156.3 | 121.4 | 124.6 |
+| Sources | 221.0 | 221.3 | 167.3 | 170.3 |
+| Markdown | 168.7 | 172.4 | 129.7 | 132.7 |
+| IDLE notes | 174.7 | 178.0 | 131.5 | 132.4 |
+| Words, seed 42 | 376.8 | 385.2 | 252.1 | 262.0 |
+| Words, seed 99 | 383.4 | 388.7 | 249.3 | 257.9 |
+| Words, seed 7 | 380.3 | 391.4 | 254.8 | 257.0 |
+| Random | 4907.3 | 4846.5 | 2964.7 | 2996.7 |
+| Benchmark EXE | 115.3 | 117.1 | 89.8 | 91.1 |
+| Zeros | 8290.5 | 8342.3 | 2768.0 | 2778.5 |
+
+This is a small improvement, not closure of the natural-text gap. On GCC,
+ordinary prose/source differences are 0-1.4% and should be treated cautiously;
+Markdown/notes improve about 2%, synthetic words about 1-3%. MSVC prose
+improves about 3% (all seven paired Alice samples, six of seven Sherlock
+samples were faster). Reused GCC random is 1.2% slower in this series;
+its paired differences ranged from -7% to +7%, so no reliable random-data
+gain or loss is established. Uniform RLE data does not execute the changed
+hash code. The remaining natural-text deficit against libzstd persists.
+
+A separate five-batch fresh-call GCC screen gave about 1-3% on most text
+inputs, with unchanged bytes. Raw/RLE screening variation is not presented
+as a universal improvement. Raw samples and reference libzstd measurements
+remain in `build/zstd-shifts/results-before-after.json`,
+`results-before-msvc-after-msvc.json` and `fresh-results-before-after.json`.
+
+An isolated adaptive-lookahead probe was rejected: a saturating hit score
+sampled only one in eight lookaheads after poor recent success. Alice,
+Sherlock and Markdown streams grew 1.4-1.7%, while throughput remained
+roughly flat. Fewer probes also lose useful matches and add bookkeeping;
+profile heat alone does not establish that skipping them is profitable.
+That code exists only under ignored `build/zstd-shifts/adaptive/` and is
+not part of the library.
+
+Validation: 264 before/after fresh/reused Release/Debug frames across 44
+inputs are byte-identical and decode with libzstd. Cases include every
+table-size boundary from 512 through 131072, small tails and the fixed text
+corpus. Both modes additionally pass 95 existing libzstd, 80 klauspost and
+73 text/sequence checks. Native debug prefix/context/RLE checks and native
+7z tests pass; ten before/after opt-in pipeline frames decode independently.
+No new buffers or retained state are introduced. Exact source/executable
+hashes, corpus bytes and scripts are under `build/zstd-shifts/manifest.json`
+and that directory.
+
+## Next-candidate loading experiment (2026-10-26)
+
+An isolated Goose parser variant computes the next failed-search position,
+loads its word, computes both hashes and reads both table entries before
+testing the current candidates. On a failed search these values are carried
+to the next iteration; after a match they are discarded. Reads follow the
+current position's table writes, preserving collisions and match choices.
+This is early ordinary loading, not a hardware prefetch instruction.
+
+Two alternatives were screened: early loading only for the p+1 long-table
+lookahead, and reusing the full pipeline's cached values for that lookahead.
+Neither removed the workload regressions. All variants remain under ignored
+`build/zstd-prefetch/`; the library retains its previous parser.
+
+Seven rotating batches, reused context, level 3, checksum enabled, medians
+in MB/s (same fixed corpus as the preceding section):
+
+| Input | GCC baseline | GCC pipeline | MSVC baseline | MSVC pipeline |
+|---|---:|---:|---:|---:|
+| Alice | 160.2 | 168.7 | 125.8 | 130.7 |
+| Sherlock | 155.0 | 160.8 | 124.6 | 128.4 |
+| Markdown | 168.0 | 174.9 | 129.9 | 135.0 |
+| IDLE notes | 177.2 | 180.0 | 132.5 | 134.2 |
+| Words, seed 42 | 375.3 | 357.8 | 258.9 | 241.5 |
+| Words, seed 99 | 389.0 | 355.1 | 256.7 | 239.1 |
+| Words, seed 7 | 384.4 | 364.7 | 258.6 | 243.7 |
+
+The GCC series overlapped a short correctness check during the first two
+inputs; separate five-batch screens also showed prose gains and word-data
+regressions. The MSVC series ran after those checks. Timing variation does
+not justify a universal speed claim. In particular, speculative work on
+successful probes adds cost; early table loading alone does not reproduce
+the complete libzstd search pipeline or close the text performance gap.
+
+Validation: the full pipeline passes compiler checks and 264 byte-exact
+fresh/reused Release/Debug comparisons across 44 inputs, including table-size
+boundaries, tiny tails and block transitions. Baseline frames also decode
+with libzstd. All timed variant outputs match baseline bytes and decode
+independently. Baseline source SHA-256 remains
+`159ec5037a393fa73b15ed67514b8be5702b1bba278763b0395e448ccddf8120`.
+Scripts, experimental sources, binary hashes and raw timing samples are in
+`build/zstd-prefetch/` (`manifest.json`, `results-*.json`, `byte-checks.json`).

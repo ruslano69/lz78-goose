@@ -11,6 +11,7 @@ Learn Goose through a binary-safe LZ78 library and a separate multi-file archive
 - `test/roundtrip.goose`: native Goose API and precondition checks.
 - `test/verify.py`: independent Python reference codec, byte-exact cross-checks and malformed-input tests.
 - `README.md`: public API and build/use instructions; `FORMAT.md`: archive contract; `EXPERIMENTS.md`: learning history.
+- `TODO_NEXT.md`: ordered archiver work plan, buffer constraints and acceptance gates; keep task status current when implementing it.
 - `LICENSE`: repository MIT license; `NOTICE`: retained original funcfinder copyright/license notice.
 - `archiver/`: separate codecs, CLI, format/memory documentation and independent tests; see its local AGENTS.md and licenses.
 - `experiments/`: original learning program and timing history; its local contract owns reproduction.

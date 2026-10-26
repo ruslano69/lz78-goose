@@ -942,10 +942,21 @@ fn encode_sequences(seqs: Seq[:], ll_ct: FseCt&, of_ct: FseCt&, ml_ct: FseCt&, o
         let nb_ll = (st_ll + ll_ct.dnb[llc2]) >> 16;
         let b_ll = st_ll & ((1 << nb_ll) - 1);
         st_ll = ll_ct.tbl[((st_ll >> nb_ll) + ll_ct.dfind[llc2]) as i64] as i64;
-        bitw_put(out, bw, b_of | (b_ml << nb_of) | (b_ll << (nb_of + nb_ml)), nb_of + nb_ml + nb_ll);
+        let nb = nb_of + nb_ml + nb_ll;
+        let states = b_of | (b_ml << nb_of) | (b_ll << (nb_of + nb_ml));
         let llb = LL_BITS[llc2];
-        bitw_put(out, bw, (s.ll - LL_BASE[llc2]) | ((s.ml - ML_BASE[mlc2]) << llb), llb + ML_BITS[mlc2]);
-        bitw_put(out, bw, s.ov - (1 << ofc2), ofc2);
+        let extra = (s.ll - LL_BASE[llc2]) | ((s.ml - ML_BASE[mlc2]) << llb);
+        let eb = llb + ML_BITS[mlc2];
+        let off = s.ov - (1 << ofc2);
+        // With fewer than 32 pending bits, a group of at most 32 fits u64.
+        // Larger sequences retain the original three bounded writes.
+        if nb + eb + ofc2 <= 32 {
+            bitw_put(out, bw, states | (extra << nb) | (off << (nb + eb)), nb + eb + ofc2);
+        } else {
+            bitw_put(out, bw, states, nb);
+            bitw_put(out, bw, extra, eb);
+            bitw_put(out, bw, off, ofc2);
+        }
         i -= 1;
     }
     bitw_add(out, bw, st_ml - of_size(ml_ct), ml_ct.tl);
@@ -1532,8 +1543,8 @@ inline fn dfast_match(data: const u8[:], a: i64, p: i64, word: u64, limit: i64) 
 fn dfast_put<T>(data: const u8[:], head: T[:], longt: T[:], base: i64, hshift: i64, lshift: i64, q: i64) {
     if q + 8 > data.len { return; }
     let w = read64(data, q);
-    let hl = (((w * 11400714819323198485) >> 47) as i64) >> lshift;
-    let hs = ((((w << 24) * 889523592379) >> (64 - HASH_BITS_ZSTD)) as i64) >> hshift;
+    let hl = ((w * 11400714819323198485) >> (47 + lshift)) as i64;
+    let hs = (((w << 24) * 889523592379) >> (64 - HASH_BITS_ZSTD + hshift)) as i64;
     let entry = (((q + base) as u64) | ((w & 4294967295) << 32)) as! T;
     longt[hl] = entry;
     head[hs] = entry;
@@ -1546,12 +1557,15 @@ fn dfast_put<T>(data: const u8[:], head: T[:], longt: T[:], base: i64, hshift: i
 fn parse_dfast<T>(data: const u8[:], start: i64, end: i64, head: T[:], longt: T[:], base: i64, hshift: i64, lshift: i64, rr: i64[:], seqs: Seq[>..]&, lits: u8[>..]&, collect: bool) -> i64 {
     // The two supported table types fold this to false (u32 positions) or true (u64 cached prefixes).
     let cached = ((~default<T>()) as u64) > 4294967295;
+    // Shift the unsigned product once; the original intermediate is nonnegative.
+    let long_shift = 47 + lshift;
+    let short_shift = 64 - HASH_BITS_ZSTD + hshift;
     var p = start;
     var anchor = start;
     while p + 16 <= end {
         let word = read64(data, p);
-        let hl = (((word * 11400714819323198485) >> 47) as i64) >> lshift;
-        let hs = ((((word << 24) * 889523592379) >> (64 - HASH_BITS_ZSTD)) as i64) >> hshift;
+        let hl = ((word * 11400714819323198485) >> long_shift) as i64;
+        let hs = (((word << 24) * 889523592379) >> short_shift) as i64;
         let le = longt[hl];
         let se = head[hs];
         let entry = (((p + base) as u64) | ((word & 4294967295) << 32)) as! T;
@@ -1562,31 +1576,30 @@ fn parse_dfast<T>(data: const u8[:], start: i64, end: i64, head: T[:], longt: T[
         var mlen: i64 = 0;
         let w1_low = (word >> 8) & 4294967295;
         let o1 = rr[0];
-        if o1 > 0 && p + 1 - o1 >= 0 && ((read64(data, p + 1 - o1) ^ w1_low) & 4294967295) == 0 {
+        // Prefer an available eight-byte match before a four-byte repeat probe.
+        let cl = ((le as u64) & 4294967295) as i64 - base;
+        if cl >= 0 && cl < p && (!cached || ((le as u64) >> 32) == (word & 4294967295)) && read64(data, cl) == word {
+            mpos = cl;
+            mlen = 8 + match_at(data, cl + 8, p + 8, min(131072, end - p) - 8);
+        } else if o1 > 0 && p + 1 - o1 >= 0 && ((read64(data, p + 1 - o1) ^ w1_low) & 4294967295) == 0 {
             s = p + 1;
             mpos = s - o1;
             mlen = dfast_match(data, mpos, s, read64(data, s), min(131072, end - s));
         } else {
-            let cl = ((le as u64) & 4294967295) as i64 - base;
-            if cl >= 0 && cl < p && (!cached || ((le as u64) >> 32) == (word & 4294967295)) && read64(data, cl) == word {
-                mpos = cl;
-                mlen = 8 + match_at(data, cl + 8, p + 8, min(131072, end - p) - 8);
-            } else {
-                let cs = ((se as u64) & 4294967295) as i64 - base;
-                if cs >= 0 && cs < p && (if cached { ((se as u64) >> 32) == (word & 4294967295) } else { ((read64(data, cs) ^ word) & 4294967295) == 0 }) {
-                    let w1 = read64(data, p + 1);
-                    let h3 = (((w1 * 11400714819323198485) >> 47) as i64) >> lshift;
-                    let e3 = longt[h3];
-                    longt[h3] = (((p + 1 + base) as u64) | ((w1 & 4294967295) << 32)) as! T;
-                    let c3 = ((e3 as u64) & 4294967295) as i64 - base;
-                    if c3 >= 0 && c3 <= p && (!cached || ((e3 as u64) >> 32) == (w1 & 4294967295)) && read64(data, c3) == w1 {
-                        s = p + 1;
-                        mpos = c3;
-                        mlen = 8 + match_at(data, c3 + 8, s + 8, min(131072, end - s) - 8);
-                    } else {
-                        mpos = cs;
-                        mlen = dfast_match(data, cs, p, word, min(131072, end - p));
-                    }
+            let cs = ((se as u64) & 4294967295) as i64 - base;
+            if cs >= 0 && cs < p && (if cached { ((se as u64) >> 32) == (word & 4294967295) } else { ((read64(data, cs) ^ word) & 4294967295) == 0 }) {
+                let w1 = read64(data, p + 1);
+                let h3 = ((w1 * 11400714819323198485) >> long_shift) as i64;
+                let e3 = longt[h3];
+                longt[h3] = (((p + 1 + base) as u64) | ((w1 & 4294967295) << 32)) as! T;
+                let c3 = ((e3 as u64) & 4294967295) as i64 - base;
+                if c3 >= 0 && c3 <= p && (!cached || ((e3 as u64) >> 32) == (w1 & 4294967295)) && read64(data, c3) == w1 {
+                    s = p + 1;
+                    mpos = c3;
+                    mlen = 8 + match_at(data, c3 + 8, s + 8, min(131072, end - s) - 8);
+                } else {
+                    mpos = cs;
+                    mlen = dfast_match(data, cs, p, word, min(131072, end - p));
                 }
             }
         }
@@ -1806,7 +1819,12 @@ fn parse_chain(data: const u8[:], start: i64, end: i64, head: u32[:], prev: u32[
         if p > next { chain_insert(data, head, prev, hbits, mask, next, p); next = p; }
         var m = find_at(data, head, prev, hbits, mask, p, end, p - anchor, rr, attempts, reps);
         if m.len == 0 {
-            p += 1 + ((p - anchor) >> 8);
+            let step = 1 + ((p - anchor) >> 8);
+            p += step;
+            // After a long unsuccessful search, insert only the last skipped
+            // position. Filling the whole gap defeats the accelerated probes.
+            // Matches still insert their complete range; a match resets anchor.
+            if p - anchor > 4096 { next = min(end, p - 1); }
             continue;
         }
         while depth > 0 {

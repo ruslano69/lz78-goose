@@ -34,6 +34,7 @@ reads its archives. Root `lz78.goose` and its format remain independent.
 
 See [build/use instructions](archiver/README.md), [7z profile](archiver/SEVENZ.md)
 and [buffer types, limits and memory measurements](archiver/BZIP2.md).
+The next implementation steps are tracked in [TODO_NEXT.md](TODO_NEXT.md).
 SA-IS in this subtree is Apache-2.0; retain its local licenses and NOTICE.
 
 ## Use as a library

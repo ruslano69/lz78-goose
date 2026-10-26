@@ -17,6 +17,9 @@
 - `zstd_cli.goose`, `verify_zstd.py`, `verify_zstd_go.py`: standalone gzstd, two-way check against the zstd command, and an optional two-way check against klauspost/compress (needs Go and the module; prints SKIPPED otherwise).
 - `zstd_test.goose`: word-prefix matching checks, including unaligned ranges, tails, mismatch bit positions and overlapping input, plus short RLE round trips for all byte values and 51 fresh/reused-context comparisons across size changes, colliding prefixes, block boundaries and an epoch reset.
 - `bench_zstd.goose`, `ZSTD-PERFORMANCE.md`: in-memory timing harness and dated performance/density observations; compiler binaries, caches and downloaded reference implementations stay under ignored build/.
+- `PROFILE-TEXT-2026-10-26.md`: current level-3 prose sampling, generated-code attribution limits and separately validated branch counts; does not establish function-by-function libzstd ratios.
+- `verify_zstd_chain.py`: levels 4..12 adaptive insertion checks against native and independent decoders; sparse repeats, block transitions and chain-window wrap.
+- `verify_zstd_text.py`: text/UTF-8 and sequence-bitstream checks, wide fields, raw transitions, fresh/reused fast encoder equality and optional before/after sequence-byte equality.
 - `gsdeflate.goose`, `verify_deflate.py`: RFC 1951 raw DEFLATE codec (`compress`, `decompress`; lazy matching after libdeflate, credited in the file header), a standalone module that the 7z writer does not use, and its two-way check against Python's zlib.
 - `bzip2_cli.goose`, `bzip2_test.goose`, `verify_bzip2.py`: standalone gbzip2 and independent interoperability/refusal checks.
 - `BZIP2.md`, `bench_bzip2_memory.py`, `bench_sevenz_memory.py`: buffer types/lifetimes, block policy and Windows whole-process peak measurements.
@@ -69,7 +72,10 @@
 - Store raw blocks when the complete compressed payload is not smaller.
 - ZSTD uniform blocks use the standard RLE block type (one stored byte); raw and RLE blocks leave repeat-offset history unchanged. Emit blocks directly into the frame output to avoid a second full-block copy.
 - ZSTD fast matching reuses the loaded current word, including bytes 1..4 for its one-byte repeat lookahead. Kept contexts reject candidates from cached four-byte prefixes; fresh calls retain compact position tables. `dfast_match` is only called with at least eight available bytes; general matching keeps its byte fallback for shorter tails. Sequence table selection uses code histograms; preserve the bitstream when optimizing only the writer.
+- Fast hash scaling combines the two right shifts on the unsigned product, converting to i64 only afterward. Preserve the existing size-dependent indices and byte-identical fresh/reused output when changing hash arithmetic; signed shifting before discarding the high bits is not equivalent.
 - Newly normalized ZSTD sequence tables use tableLog 8 (256 states); the predefined tables retain their standard logs. Changing normalization can change compressed bytes without changing decoded data.
+- The fast parser prefers an available eight-byte long-table match before the one-byte repeat lookahead. This changes match choices and output bytes. Sequence writing combines fields only when their total is at most 32 bits (the accumulator has fewer than 32 pending bits); wider groups retain three bounded writes. Writer-only changes must preserve the bitstream.
+- Hash-chain parsing keeps dense insertion until more than 4096 pending literal bytes without a match, then inserts only the last position of each skipped gap. Matched ranges remain dense and matches reset the threshold. This is a measured speed/density trade-off, not a guarantee of byte-identical output; retain sparse/late-match regression cases.
 - Fixed tables own MTF/Huffman state. Dynamic scratch lives within one block call;
   do not retain views across arena growth. No Unicode transformation or C helper code.
 - Read files directly into contents; trial compression appends to final archive output
@@ -98,6 +104,8 @@
 - `goose run bzip2_test.goose`; build bzip2_cli.goose optimized/debug and run
   `verify_bzip2.py --exe EXE --sevenzip FULL_7ZA --out REPO_BUILD_DIR` for both.
 - `python -B verify_zstd.py --goose GOOSE --zstd ZSTD --out REPO_BUILD_DIR` after any zstd change.
+- After chain-search changes, run `python -B archiver/verify_zstd_chain.py --exe GZSTD --zstd ZSTD --out REPO_BUILD_DIR` from the repository root for optimized/debug CLIs. Optional `--checker` accepts the klauspost checker protocol from `verify_zstd_go.py`.
+- After fast-parser/sequence-writer changes, run `python -B archiver/verify_zstd_text.py --exe GZSTD --zstd ZSTD --out REPO_BUILD_DIR` for optimized/debug CLIs. Optional `--bench`, `--before-bench` and `--checker` check reused-context equality, unchanged higher-level sequence bytes and a second independent decoder.
 - `goose run zstd_test.goose --debug` after changing prefix matching.
 - `python -B verify_deflate.py --goose GOOSE --out REPO_BUILD_DIR` after any gsdeflate change.
   Also run `python -B verify_zstd_go.py --goose GOOSE --out REPO_BUILD_DIR [--require]`: the zstd command
