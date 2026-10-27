@@ -561,3 +561,156 @@ independently. Baseline source SHA-256 remains
 `159ec5037a393fa73b15ed67514b8be5702b1bba278763b0395e448ccddf8120`.
 Scripts, experimental sources, binary hashes and raw timing samples are in
 `build/zstd-prefetch/` (`manifest.json`, `results-*.json`, `byte-checks.json`).
+
+## Cached Huffman bit window (2026-10-27)
+
+The Huffman literal decoder keeps an eight-byte window while consecutive
+backwards reads remain inside it. A refill loads a word starting up to four
+bytes before the requested position; stream ends and past-end positions use
+the original reader. Only scalar state is added. The table lookup, output,
+invalid-entry handling and final position check are unchanged.
+
+Seven alternating paired batches, three benchmark warmups per process, GCC
+16.1.0 `-O2 -g` standalone, one thread, I/O outside the timer. Frames are
+from zstd CLI level 3 and contain the same source bytes for both variants.
+Each timed result was compared byte-for-byte with its input. The three EXEs
+were built from this project; the benchmark EXE includes debug symbols.
+
+| Input | Before MB/s | After MB/s | Change |
+|---|---:|---:|---:|
+| benchmark EXE | 361.6 | 377.7 | +4.5% |
+| gzstd EXE | 407.9 | 419.7 | +2.9% |
+| g7z EXE | 377.6 | 398.1 | +5.4% |
+| repeated sources | 2251.7 | 2294.4 | +1.9% |
+| synthetic words | 713.8 | 713.3 | −0.1% |
+| random | 10609.6 | 10630.9 | +0.2% |
+| zeros | 13169.8 | 13223.2 | +0.4% |
+
+This is a small single-machine screen, not a universal speed claim; the EXEs
+are related. The raw/RLE cases do not establish a change in Huffman throughput.
+All samples and exact frame hashes are in ignored `build/zstd-huf-opt/screen.json`;
+the standalone baseline, candidate and driver are retained beside them.
+
+Validation: compiler checks, native debug tests including a direct comparison
+with the original reader across 1–11 bit tables, short streams, cache refills,
+invalid table entries and overrun; 95 libzstd interoperability/refusal checks
+and 80 klauspost/compress v1.18.0 checks in each of optimized and debug modes;
+73 text/sequence cases in each mode checked with libzstd and klauspost.
+
+## Interleaved four-stream Huffman decoding (2026-10-27)
+
+Four-stream literal sections now decode their streams in one unrolled loop on
+one thread. Each stream has its own bit reader and cached word; its symbols
+are written into its own portion of the grow-only literal buffer. The buffer
+is extended once for the declared literal size; no four complete temporary
+outputs are allocated. Short streams still use the existing bit-reader
+fallback, and invalid streams return failure with output discarded by callers.
+
+An indexed four-stream prototype had no consistent benefit. The unrolled
+version was compared with the preceding Huffman-window implementation using
+the same libzstd-produced frames, GCC 16.1.0 `-O2 -g`, standalone, two
+independent alternating series (five and nine pairs, three warmups). File I/O
+and process startup are outside the timed region. The table is the medians of
+the nine-pair confirmation; every result was compared to the original input.
+
+| Input | Level | Before MB/s | After MB/s | Change |
+|---|---:|---:|---:|---:|
+| gzstd EXE | 3 / 19 | 418.1 / 364.5 | 435.2 / 374.3 | +4.1% / +2.7% |
+| g7z EXE | 3 / 19 | 396.0 / 345.0 | 424.2 / 355.1 | +7.1% / +2.9% |
+| Sherlock | 3 / 19 | 453.0 / 552.4 | 471.4 / 561.6 | +4.0% / +1.7% |
+| Sources | 3 / 19 | 560.1 / 625.2 | 576.3 / 637.6 | +2.9% / +2.0% |
+| 256 words | 3 / 19 | 707.8 / 378.5 | 731.6 / 392.1 | +3.4% / +3.6% |
+| Random | 3 / 19 | 10662.2 / 10595.5 | 10692.5 / 10683.1 | +0.3% / +0.8% |
+
+This is a local corpus/compiler result; it does not identify hardware-resource
+contention. The indexed and unrolled prototypes also differ in output and
+control details, so their timing difference cannot be attributed to one cause.
+Raw samples, inputs, sources and binaries remain under ignored
+`build/zstd-huf4-unrolled/` and `build/zstd-decode-levels/`.
+
+Validation: 8046 native debug comparisons of four-way against sequential
+Huffman decoding with uneven splits, small streams, invalid entries and
+overruns; native context/prefix and 7z checks. Optimized and debug prototypes
+passed 95 libzstd interoperability/refusal and 80 klauspost/compress v1.18.0
+checks each. The final optimized and debug CLIs passed 73 text/sequence cases
+each with both independent decoders; 304 truncated or mutated libzstd frames
+were rejected by the old, optimized and debug decoders alike.
+
+## Combined sequence output limit check (2026-10-27)
+
+The sequence decoder checks the combined literal and match lengths against
+the remaining block/caller limit before writing either part. The separate
+second check after copying literals is no longer needed. The invalid-offset
+and literal input checks remain; as before, callers discard any partial
+output on failure. The valid lengths are bounded by the Zstd code tables,
+and the enclosing decoder limits the output end to at most 2^62 bytes.
+No buffers, code tables or encoded bytes change.
+
+Windows x64, GCC 16.1.0 `-O2 -g`, Goose `-O2`, standalone; nine alternating
+pairs, three warmups, same libzstd frames, no I/O or startup in the timer.
+Every output was compared with the original. Medians in decimal MB/s:
+
+| Input | Level | Before | After |
+|---|---:|---:|---:|
+| gzstd EXE | 3 / 19 | 478.6 / 371.6 | 486.8 / 382.4 |
+| g7z EXE | 3 / 19 | 472.2 / 349.7 | 479.8 / 362.5 |
+| Sherlock | 3 / 19 | 462.8 / 562.4 | 474.1 / 575.1 |
+| Sources | 3 / 19 | 567.3 / 624.3 | 592.1 / 638.4 |
+| 256 words | 3 / 19 | 723.4 / 421.4 | 729.9 / 418.9 |
+| Random | 3 / 19 | 10551.3 / 10499.1 | 10535.6 / 10508.4 |
+
+The first five-pair screen showed a similar small gain on text and EXE.
+These are single-machine/compiler measurements; small differences on words
+and random data are not evidence of a consistent change. All individual
+samples and hashes are under ignored `build/zstd-seq-onecheck/`.
+
+Validation: 95 libzstd and 80 klauspost/compress 1.18.0 interoperability
+checks in each optimized/debug prototype; 73 text/sequence cases in each
+final build, independently checked with both decoders. Native debug Huffman,
+prefix and reused-context tests, native 7z tests, and compiler checks pass.
+The new `verify_zstd_limits.py` performs 48 output-limit checks per build on
+compressed blocks without a frame content size, verifies that they contain
+sequences, and checks preservation of the destination on refusal. The two
+final builds also matched the previous decoder on 304 mutated/truncated frames.
+
+Other isolated screens were rejected: our precomputed FSE entry variants in
+per-block or retained tables did not improve this corpus, and emitting short
+literals or matches byte by byte slowed several inputs. The separately
+instrumented debug decoder counted 12683 sequences on the level-3 sources
+block, 9584 with no literals, and 7273 matches of at most eight bytes; such
+frequency alone did not make byte-at-a-time copying profitable. The counted
+outputs matched the reference bytes. Experimental scripts/results remain in
+`build/zstd-seq-{precalc,stored,smalllit,smallmatch,counts}/`.
+
+## Combining independent decoder work (2026-10-27)
+
+The Huffman X2 and output-limit changes above were developed independently of
+`bd980af` and `34a6492`. After integration, the upstream bit-reservoir reader
+is retained for one-stream Huffman; four-stream X2 and the combined output
+check are retained alongside the upstream per-block predecoded FSE entries.
+Earlier before/after tables describe the individual versions tested, not a
+measurement of their combined gains.
+
+Five rotating batches, three warmups, GCC 16.1.0 `-O2 -g`, Goose `-O2`,
+identical libzstd frames; all outputs verified. Medians in MB/s. `ours` is
+the independent decoder before integration, `upstream` is 34a6492, and
+`combined` includes both. Startup and I/O are excluded.
+
+| Input | Level | Upstream | Ours | Combined |
+|---|---:|---:|---:|---:|
+| gzstd EXE | 3 / 19 | 447.1 / 376.0 | 491.5 / 385.4 | 485.2 / 374.0 |
+| g7z EXE | 3 / 19 | 437.8 / 354.7 | 484.8 / 362.4 | 474.9 / 355.4 |
+| Sherlock | 3 / 19 | 466.0 / 564.8 | 470.0 / 574.5 | 473.7 / 565.7 |
+| Sources | 3 / 19 | 583.7 / 630.0 | 599.4 / 649.6 | 589.7 / 622.4 |
+| 256 words | 3 / 19 | 729.9 / 386.3 | 732.0 / 420.6 | 718.6 / 418.7 |
+| Random | 3 / 19 | 10525.5 / 10598.2 | 10469.1 / 10642.2 | 10557.0 / 10605.8 |
+
+These are screening measurements on one machine; small differences need
+further investigation and cannot be attributed to a single change. Raw
+samples, input hashes and binaries are under `build/zstd-merge-comparison/`.
+
+The combined decoder passed 59400 independent scalar Huffman checks, 8046
+four-stream/batched checks, native prefix/context and 7z tests, and in both
+release/debug: 95 libzstd, 80 klauspost, 73 text/sequence and 48 output-limit
+checks. Both builds rejected 304 mutated or truncated test frames as did the
+prior independent decoder. Partial output on failure remains unspecified.

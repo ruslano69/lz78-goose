@@ -45,6 +45,8 @@ fn main() {
         }
     }
     print(huffman_stream_checks(), " scalar Huffman comparisons passed");
+    huffman_cache_checks();
+    huffman_four_checks();
     let contexts = context_prefix_checks();
     print(contexts, " reused-context prefix checks passed");
     print(count, " prefix comparisons, bit positions and overlap checks passed");
@@ -88,6 +90,90 @@ fn context_prefix_checks() -> i64 {
     }
     return count;
 }
+fn huffman_cache_checks() {
+    for acc in 1..12 {
+        var h = zstd::huf_new();
+        h.acc = acc;
+        for pattern in 3 {
+            for i in 1 << acc {
+                h.sym[i] = (i % 251) as u8;
+                h.nb[i] = if pattern == 2 && i % 19 == 0 { 0 } else { (1 + (i + pattern) % acc) as u8 };
+            }
+            for length in 1..81 {
+                var src: u8[>..] = [];
+                for i in length { src.push(((i * 73 + length * 17 + pattern * 31) % 256) as u8); }
+                src[length - 1] = (1 + (length * 17) % 255) as u8;
+                for extra in 4 {
+                    let count = length * 8 / acc + extra;
+                    var expected: u8[>..] = [];
+                    var actual: u8[>..] = [];
+                    var r = zstd::bwd_init(src);
+                    var ok = true;
+                    for i in count {
+                        let idx = zstd::bwd_peek(src, r, h.acc);
+                        let nb = h.nb[idx] as i64;
+                        if nb == 0 { ok = false; break; }
+                        r.pos -= nb;
+                        expected.push(h.sym[idx]);
+                    }
+                    ok = ok && r.pos >= 0;
+                    assert(zstd::huf_stream(src, h, count, actual) == ok);
+                    if ok { assert(actual == expected); }
+                }
+            }
+        }
+    }
+    print("Huffman cache and tail checks passed");
+}
+
+fn huffman_four_checks() {
+    var cases = 0;
+    for acc in 1..12 {
+        var h = zstd::huf_new();
+        h.acc = acc;
+        for pattern in 3 {
+            for k in 1 << acc {
+                h.sym[k] = (k % 251) as u8;
+                h.nb[k] = if pattern == 2 && k % 17 == 0 { 0 } else { (1 + (k + pattern) % acc) as u8 };
+            }
+            for length in 1..50 {
+                var a: u8[>..] = []; var b: u8[>..] = [];
+                var c: u8[>..] = []; var d: u8[>..] = [];
+                for i in length {
+                    a.push(((i * 37 + length) % 256) as u8);
+                    b.push(((i * 53 + length + 1) % 256) as u8);
+                    c.push(((i * 71 + length + 2) % 256) as u8);
+                    d.push(((i * 89 + length + 3) % 256) as u8);
+                }
+                a[length - 1] = (1 + (length * 7) % 255) as u8;
+                b[length - 1] = (1 + (length * 11) % 255) as u8;
+                c[length - 1] = (1 + (length * 13) % 255) as u8;
+                d[length - 1] = (1 + (length * 17) % 255) as u8;
+                for extra in 5 {
+                    let count = (length * 8 / acc) * 4 + extra;
+                    let seg = (count + 3) / 4;
+                    if count < 3 * seg { continue; }
+                    var expected: u8[>..] = [55];
+                    var actual: u8[>..] = [55];
+                    var ok = zstd::huf_stream(a, h, seg, expected);
+                    if ok { ok = zstd::huf_stream(b, h, seg, expected); }
+                    if ok { ok = zstd::huf_stream(c, h, seg, expected); }
+                    if ok { ok = zstd::huf_stream(d, h, count - 3 * seg, expected); }
+                    let found = zstd::huf_stream4(a, b, c, d, h, count, actual);
+                    assert(found == ok);
+                    if ok { assert(actual == expected); }
+                    var batched: u8[>..] = [55];
+                    let found_batched = zstd::huf_batched4(a, b, c, d, h, count, batched);
+                    assert(found_batched == ok);
+                    if ok { assert(batched == expected); }
+                    cases += 1;
+                }
+            }
+        }
+    }
+    print(cases, " four-stream Huffman checks passed");
+}
+
 
 fn huf_scalar(src: const u8[:], h: const zstd::Huf&, count: i64, out: u8[>..]&) -> bool {
     if src.len == 0 || src[src.len - 1] == 0 { return false; }

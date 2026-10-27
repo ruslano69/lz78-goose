@@ -360,6 +360,241 @@ fn huf_stream(src: const u8[:], h: const Huf&, count: i64, out: u8[>..]&) -> boo
     }
     return r.pos >= 0;
 }
+// Four independent bitstreams interleave on one thread; each retains its own bounds.
+fn huf_stream4(a: const u8[:], b: const u8[:], c: const u8[:], d: const u8[:], h: Huf, count: i64, out: u8[>..]&) -> bool {
+    if count >= 32768 { return huf_batched4(a, b, c, d, h, count, out); }
+    if a.len < 1 || b.len < 1 || c.len < 1 || d.len < 1 { return false; }
+    if a[a.len - 1] == 0 || b[b.len - 1] == 0 || c[c.len - 1] == 0 || d[d.len - 1] == 0 { return false; }
+    let seg = (count + 3) / 4;
+    if count < 3 * seg { return false; }
+    var r0 = bwd_init(a);
+    var base0: i64 = -1;
+    var word0: u64 = 0;
+    var r1 = bwd_init(b);
+    var base1: i64 = -1;
+    var word1: u64 = 0;
+    var r2 = bwd_init(c);
+    var base2: i64 = -1;
+    var word2: u64 = 0;
+    var r3 = bwd_init(d);
+    var base3: i64 = -1;
+    var word3: u64 = 0;
+    let start = out.len;
+    out.resize(start + count, 0);
+    for i in seg {
+        let lo0 = r0.pos - h.acc;
+        var idx0: i64 = 0;
+        if lo0 >= 0 && (lo0 >> 3) + 8 <= a.len {
+            if base0 < 0 || lo0 < base0 * 8 || r0.pos > (base0 + 8) * 8 {
+                base0 = max(0, (lo0 >> 3) - 4);
+                word0 = read64(a, base0);
+            }
+            idx0 = ((word0 >> ((lo0 - base0 * 8) as u64)) as! i64) & ((1 << h.acc) - 1);
+        } else { idx0 = bwd_peek(a, r0, h.acc); }
+        let nb0 = h.nb[idx0] as i64;
+        if nb0 == 0 { return false; }
+        r0.pos -= nb0;
+        out[start + 0 * seg + i] = h.sym[idx0];
+        let lo1 = r1.pos - h.acc;
+        var idx1: i64 = 0;
+        if lo1 >= 0 && (lo1 >> 3) + 8 <= b.len {
+            if base1 < 0 || lo1 < base1 * 8 || r1.pos > (base1 + 8) * 8 {
+                base1 = max(0, (lo1 >> 3) - 4);
+                word1 = read64(b, base1);
+            }
+            idx1 = ((word1 >> ((lo1 - base1 * 8) as u64)) as! i64) & ((1 << h.acc) - 1);
+        } else { idx1 = bwd_peek(b, r1, h.acc); }
+        let nb1 = h.nb[idx1] as i64;
+        if nb1 == 0 { return false; }
+        r1.pos -= nb1;
+        out[start + 1 * seg + i] = h.sym[idx1];
+        let lo2 = r2.pos - h.acc;
+        var idx2: i64 = 0;
+        if lo2 >= 0 && (lo2 >> 3) + 8 <= c.len {
+            if base2 < 0 || lo2 < base2 * 8 || r2.pos > (base2 + 8) * 8 {
+                base2 = max(0, (lo2 >> 3) - 4);
+                word2 = read64(c, base2);
+            }
+            idx2 = ((word2 >> ((lo2 - base2 * 8) as u64)) as! i64) & ((1 << h.acc) - 1);
+        } else { idx2 = bwd_peek(c, r2, h.acc); }
+        let nb2 = h.nb[idx2] as i64;
+        if nb2 == 0 { return false; }
+        r2.pos -= nb2;
+        out[start + 2 * seg + i] = h.sym[idx2];
+        if i < count - 3 * seg {
+            let lo3 = r3.pos - h.acc;
+            var idx3: i64 = 0;
+            if lo3 >= 0 && (lo3 >> 3) + 8 <= d.len {
+                if base3 < 0 || lo3 < base3 * 8 || r3.pos > (base3 + 8) * 8 {
+                    base3 = max(0, (lo3 >> 3) - 4);
+                    word3 = read64(d, base3);
+                }
+                idx3 = ((word3 >> ((lo3 - base3 * 8) as u64)) as! i64) & ((1 << h.acc) - 1);
+            } else { idx3 = bwd_peek(d, r3, h.acc); }
+            let nb3 = h.nb[idx3] as i64;
+            if nb3 == 0 { return false; }
+            r3.pos -= nb3;
+            out[start + 3 * seg + i] = h.sym[idx3];
+        }
+    }
+    return r0.pos >= 0 && r1.pos >= 0 && r2.pos >= 0 && r3.pos >= 0;
+}
+// Five lookups consume at most 55 bits and write at most ten bytes.
+// The caller reserves ten bytes; the next symbol overwrites speculative second bytes.
+fn huf_batch(word: u64, base: i64, bits: i64&, table: const u32[:], acc: i64, mask: i64, out: u8[:], pos: i64&) -> bool {
+    let ix0 = ((word >> ((bits - acc - base) as u64)) as! i64) & mask;
+    let e0 = table[ix0];
+    if e0 == 0 { return false; }
+    bits -= ((e0 >> 16) & 255) as i64;
+    out[pos] = (e0 & 255) as u8;
+    out[pos + 1] = ((e0 >> 8) & 255) as u8;
+    pos += (1 + ((e0 >> 24) & 1)) as i64;
+    let ix1 = ((word >> ((bits - acc - base) as u64)) as! i64) & mask;
+    let e1 = table[ix1];
+    if e1 == 0 { return false; }
+    bits -= ((e1 >> 16) & 255) as i64;
+    out[pos] = (e1 & 255) as u8;
+    out[pos + 1] = ((e1 >> 8) & 255) as u8;
+    pos += (1 + ((e1 >> 24) & 1)) as i64;
+    let ix2 = ((word >> ((bits - acc - base) as u64)) as! i64) & mask;
+    let e2 = table[ix2];
+    if e2 == 0 { return false; }
+    bits -= ((e2 >> 16) & 255) as i64;
+    out[pos] = (e2 & 255) as u8;
+    out[pos + 1] = ((e2 >> 8) & 255) as u8;
+    pos += (1 + ((e2 >> 24) & 1)) as i64;
+    let ix3 = ((word >> ((bits - acc - base) as u64)) as! i64) & mask;
+    let e3 = table[ix3];
+    if e3 == 0 { return false; }
+    bits -= ((e3 >> 16) & 255) as i64;
+    out[pos] = (e3 & 255) as u8;
+    out[pos + 1] = ((e3 >> 8) & 255) as u8;
+    pos += (1 + ((e3 >> 24) & 1)) as i64;
+    let ix4 = ((word >> ((bits - acc - base) as u64)) as! i64) & mask;
+    let e4 = table[ix4];
+    if e4 == 0 { return false; }
+    bits -= ((e4 >> 16) & 255) as i64;
+    out[pos] = (e4 & 255) as u8;
+    out[pos + 1] = ((e4 >> 8) & 255) as u8;
+    pos += (1 + ((e4 >> 24) & 1)) as i64;
+    return true;
+}
+
+// Decode a short tail with the checked reader.
+fn huf_finish(src: const u8[:], h: Huf, r: Bwd&, out: u8[:], pos: i64&) -> bool {
+    while pos < out.len {
+        let idx = bwd_peek(src, r, h.acc);
+        let nb = h.nb[idx] as i64;
+        if nb == 0 { return false; }
+        r.pos -= nb;
+        out[pos] = h.sym[idx];
+        pos += 1;
+    }
+    return r.pos >= 0;
+}
+
+// Large four-stream sections use a prevalidated X2 table and bounded batches.
+fn huf_batched4(a: const u8[:], b: const u8[:], c: const u8[:], d: const u8[:], h: Huf, count: i64, out: u8[>..]&) -> bool {
+    if a.len < 1 || b.len < 1 || c.len < 1 || d.len < 1 { return false; }
+    if a[a.len - 1] == 0 || b[b.len - 1] == 0 || c[c.len - 1] == 0 || d[d.len - 1] == 0 { return false; }
+    let seg = (count + 3) / 4;
+    if count < 3 * seg { return false; }
+    let mask = (1 << h.acc) - 1;
+    var table: u32[2048] = [0; 2048];
+    for i in 1 << h.acc {
+        let n = h.nb[i] as i64;
+        if n > 0 {
+            let next = (i << n) & mask;
+            let n2 = h.nb[next] as i64;
+            var fixed = n2 > 0 && n + n2 <= h.acc;
+            if fixed {
+                for suffix in 1 << n {
+                    if h.nb[next + suffix] != h.nb[next] || h.sym[next + suffix] != h.sym[next] { fixed = false; break; }
+                }
+            }
+            if fixed {
+                table[i] = (h.sym[i] as u32) | ((h.sym[next] as u32) << 8) | (((n + n2) as u32) << 16) | (1 << 24);
+            } else { table[i] = (h.sym[i] as u32) | ((n as u32) << 16); }
+        }
+    }
+    var r0 = bwd_init(a);
+    var p0: i64 = 0;
+    var r1 = bwd_init(b);
+    var p1: i64 = 0;
+    var r2 = bwd_init(c);
+    var p2: i64 = 0;
+    var r3 = bwd_init(d);
+    var p3: i64 = 0;
+    let start = out.len;
+    out.resize(start + count, 0);
+    var o0 = out[start..start + seg];
+    var o1 = out[start + seg..start + 2 * seg];
+    var o2 = out[start + 2 * seg..start + 3 * seg];
+    var o3 = out[start + 3 * seg..start + count];
+    // Warm each stream away from its end before loading a full bit window.
+    while p0 + 10 <= o0.len && r0.pos >= 55 && ((r0.pos - 55) >> 3) + 8 > a.len {
+        let idx = bwd_peek(a, r0, h.acc);
+        let nb = h.nb[idx] as i64;
+        if nb == 0 { return false; }
+        r0.pos -= nb;
+        o0[p0] = h.sym[idx];
+        p0 += 1;
+    }
+    while p1 + 10 <= o1.len && r1.pos >= 55 && ((r1.pos - 55) >> 3) + 8 > b.len {
+        let idx = bwd_peek(b, r1, h.acc);
+        let nb = h.nb[idx] as i64;
+        if nb == 0 { return false; }
+        r1.pos -= nb;
+        o1[p1] = h.sym[idx];
+        p1 += 1;
+    }
+    while p2 + 10 <= o2.len && r2.pos >= 55 && ((r2.pos - 55) >> 3) + 8 > c.len {
+        let idx = bwd_peek(c, r2, h.acc);
+        let nb = h.nb[idx] as i64;
+        if nb == 0 { return false; }
+        r2.pos -= nb;
+        o2[p2] = h.sym[idx];
+        p2 += 1;
+    }
+    while p3 + 10 <= o3.len && r3.pos >= 55 && ((r3.pos - 55) >> 3) + 8 > d.len {
+        let idx = bwd_peek(d, r3, h.acc);
+        let nb = h.nb[idx] as i64;
+        if nb == 0 { return false; }
+        r3.pos -= nb;
+        o3[p3] = h.sym[idx];
+        p3 += 1;
+    }
+    // Warm each stream away from its end before loading a full bit window.
+    while p0 + 10 <= o0.len && p1 + 10 <= o1.len && p2 + 10 <= o2.len && p3 + 10 <= o3.len {
+        let lo0 = r0.pos - 55;
+        if lo0 < 0 || (lo0 >> 3) + 8 > a.len { break; }
+        let base0 = lo0 >> 3;
+        let word0 = read64(a, base0);
+        let lo1 = r1.pos - 55;
+        if lo1 < 0 || (lo1 >> 3) + 8 > b.len { break; }
+        let base1 = lo1 >> 3;
+        let word1 = read64(b, base1);
+        let lo2 = r2.pos - 55;
+        if lo2 < 0 || (lo2 >> 3) + 8 > c.len { break; }
+        let base2 = lo2 >> 3;
+        let word2 = read64(c, base2);
+        let lo3 = r3.pos - 55;
+        if lo3 < 0 || (lo3 >> 3) + 8 > d.len { break; }
+        let base3 = lo3 >> 3;
+        let word3 = read64(d, base3);
+        if !huf_batch(word0, base0 * 8, r0.pos, table, h.acc, mask, o0, p0) { return false; }
+        if !huf_batch(word1, base1 * 8, r1.pos, table, h.acc, mask, o1, p1) { return false; }
+        if !huf_batch(word2, base2 * 8, r2.pos, table, h.acc, mask, o2, p2) { return false; }
+        if !huf_batch(word3, base3 * 8, r3.pos, table, h.acc, mask, o3, p3) { return false; }
+    }
+    if !huf_finish(a, h, r0, o0, p0) { return false; }
+    if !huf_finish(b, h, r1, o1, p1) { return false; }
+    if !huf_finish(c, h, r2, o2, p2) { return false; }
+    if !huf_finish(d, h, r3, o3, p3) { return false; }
+    return true;
+}
+
+
 
 // Literals section (RFC 8878 3.1.1.3.1). Appends the literal bytes to lits; returns the
 // section's byte length or -1.
@@ -440,10 +675,8 @@ fn lit_section(blk: const u8[:], lits: u8[>..]&, ctx: Ctx&) -> i64 {
         let data = body[6..body.len];
         if s1 + s2 + s3 > data.len { return -1; }
         let seg = (regen + 3) / 4;
-        if !huf_stream(data[0..s1], ctx.huf, seg, lits) { return -1; }
-        if !huf_stream(data[s1..s1 + s2], ctx.huf, seg, lits) { return -1; }
-        if !huf_stream(data[s1 + s2..s1 + s2 + s3], ctx.huf, seg, lits) { return -1; }
-        if !huf_stream(data[s1 + s2 + s3..data.len], ctx.huf, regen - 3 * seg, lits) { return -1; }
+        if !huf_stream4(data[0..s1], data[s1..s1 + s2], data[s1 + s2..s1 + s2 + s3],
+                        data[s1 + s2 + s3..data.len], ctx.huf, regen, lits) { return -1; }
     }
     return hdr + csize;
 }
@@ -594,8 +827,8 @@ fn sequences(blk: const u8[:], lits: const u8[:], out: u8[>..]&, frame_start: i6
         if r.pos < 0 { return false; }
         // Literals first, then the match from the window (RFC 8878 3.1.1.3.2.2).
         if lp + ll > lits.len { return false; }
-        // A block never decodes to more than 128 KiB, and never past the caller's limit.
-        if out.len + ll > cap_end { return false; }
+        // Validate both parts before writing; a block stays within 128 KiB and the caller limit.
+        if out.len + ll + ml > cap_end { return false; }
         if ll > 0 { out.append(lits[lp..lp + ll]); }
         lp += ll;
         let ll0: i64 = if ll == 0 { 1 } else { 0 };
@@ -619,7 +852,6 @@ fn sequences(blk: const u8[:], lits: const u8[:], out: u8[>..]&, frame_start: i6
         }
         let produced = out.len - frame_start;
         if offset <= 0 || offset > produced { return false; }
-        if out.len + ml > cap_end { return false; }
         // Source before the end of the output: one copy when it does not overlap what is
         // written, else the repeating pattern is extended by doubling chunks.
         let base = out.len - offset;
